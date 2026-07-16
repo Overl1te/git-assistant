@@ -51,6 +51,13 @@ readonly TUI_RED=$'\e[91m' TUI_BLUE=$'\e[94m' TUI_BRIGHT_CYAN=$'\e[1;96m'
 # Always talk to the real terminal (fixes hang under bash -c / curl / pipes)
 TTY="/dev/tty"
 
+# Non-interactive confirms: GIT_ASSISTANT_ASSUME_YES=1 or -y / --yes
+assume_yes() {
+  [[ "${GIT_ASSISTANT_ASSUME_YES:-0}" == "1" ]] && return 0
+  [[ "${ASSUME_YES:-0}" == "1" ]] && return 0
+  return 1
+}
+
 die() {
   printf '%sERROR: %s%s\n' "$TUI_RED" "$*" "$TUI_NC" >"$TTY" 2>&1 || printf 'ERROR: %s\n' "$*" >&2
   exit 1
@@ -227,6 +234,9 @@ ui_msg() {
 }
 
 ui_yesno() {
+  if assume_yes; then
+    return 0
+  fi
   local title="$1"
   shift
   local w choice
@@ -931,7 +941,8 @@ refresh_updater_from_remote() {
   [[ "${GIT_ASSISTANT_UPDATER_REFRESHED:-}" == "1" ]] && return 0
   local tmp
   tmp="$(mktemp)"
-  if curl -fsSL "${REPO_RAW_BASE}/${DEFAULT_BRANCH}/install.sh" -o "$tmp" 2>/dev/null; then
+  if curl -fsSL --connect-timeout 10 --max-time 60 \
+    "${REPO_RAW_BASE}/${DEFAULT_BRANCH}/install.sh" -o "$tmp" 2>/dev/null; then
     if ! cmp -s "$tmp" "${APP_DIR}/install.sh" 2>/dev/null; then
       log_step "Обновляю installer из remote…"
       cp -f "$tmp" "${APP_DIR}/install.sh"
@@ -948,6 +959,13 @@ cmd_update() {
   check_root
   is_installed || die "Не установлено. Сначала: sudo ${APP_NAME} install"
   detect_run_user
+
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -y|--yes) export GIT_ASSISTANT_ASSUME_YES=1 ;;
+    esac
+  done
 
   # Prefer newest update logic (fixes dirty tracked config.yaml blocking git checkout)
   refresh_updater_from_remote "$@"
@@ -1300,9 +1318,15 @@ Git Assistant with AI  ($(local_version 2>/dev/null || echo cli))
 
 Обновление:
   sudo ${APP_NAME} check-update
-  sudo ${APP_NAME} update
-  # если локальный updater сломан / dirty tree:
-  sudo bash -c "\$(curl -fsSL ${REPO_RAW_BASE}/${DEFAULT_BRANCH}/install.sh)" @ update
+  sudo ${APP_NAME} update -y
+  # без вопросов / если TUI зависает:
+  sudo GIT_ASSISTANT_ASSUME_YES=1 ${APP_NAME} update -y
+  # или вручную через git (config сохранится):
+  #   sudo cp -a /opt/git-assistant/config.yaml /tmp/ga-config.yaml
+  #   sudo git -C /opt/git-assistant fetch --depth 1 origin master
+  #   sudo git -C /opt/git-assistant reset --hard origin/master
+  #   sudo cp -a /tmp/ga-config.yaml /opt/git-assistant/config.yaml
+  #   sudo systemctl restart git-assistant
 
 Инфо / конфиг:
   ${APP_NAME} info
@@ -1325,10 +1349,27 @@ main() {
     shift
   fi
 
+  # Global -y before subcommand: install.sh -y update
+  while [[ "${1:-}" == "-y" || "${1:-}" == "--yes" ]]; do
+    export GIT_ASSISTANT_ASSUME_YES=1
+    shift
+  done
+
   local cmd="${1:-}"
   if [[ -n "$cmd" ]]; then
     shift
   fi
+
+  # Also accept update -y
+  local filtered=()
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -y|--yes) export GIT_ASSISTANT_ASSUME_YES=1 ;;
+      *) filtered+=("$a") ;;
+    esac
+  done
+  set -- "${filtered[@]+"${filtered[@]}"}"
 
   case "$cmd" in
     install) cmd_install "$@" ;;
