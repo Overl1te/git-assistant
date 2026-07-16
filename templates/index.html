@@ -37,6 +37,9 @@
         <div class="meta">
           <span>Ветка: <code data-branch>{{ p.branch or "—" }}</code></span>
           <span>Путь: <code>{{ p.path }}</code></span>
+          {% if p.is_remote %}
+          <span>Remote: <code>{{ p.remote_host }}</code></span>
+          {% endif %}
           {% if p.test_command %}<span>Тесты: <code>{{ p.test_command }}</code></span>{% endif %}
           {% if p.github_repo %}<span>Repo: <code>{{ p.github_repo }}</code></span>{% endif %}
         </div>

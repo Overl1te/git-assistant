@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Git Assistant with AI — installer & console TUI
 #
-# One-liner (как OverVPN):
+# One-liner:
 #   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Overl1te/git-assistant/master/install.sh)" @ install
 #
 # Локально:
@@ -41,7 +41,7 @@ RUN_USER=""
 RUN_UID=""
 RUN_GID=""
 
-# --- TUI (OverVPN-style) ---
+# --- Console TUI ---
 readonly BOX_TL='╔' BOX_TR='╗' BOX_BL='╚' BOX_BR='╝'
 readonly BOX_H='═' BOX_V='║' BOX_LT='╠' BOX_RT='╣'
 readonly TUI_NC=$'\e[0m' TUI_BOLD=$'\e[1m' TUI_DIM=$'\e[2m'
@@ -455,7 +455,12 @@ ask_gh() {
 
 ask_projects() {
   PROJECT_LINES=()
-  ui_msg "Проекты" "Добавьте git-репозитории для управления.
+  ui_msg "Проекты" "Добавьте git-репозитории.
+
+Если код на Windows-ПК, а Assistant на Ubuntu —
+укажите remote_host (SSH) и путь Windows, например:
+  C:/Users/you/Documents/GitHub/app
+
 Можно пропустить и править config.yaml позже."
 
   while true; do
@@ -464,8 +469,25 @@ ask_projects() {
       break
     fi
     local name path test_command test_timeout auto_pull github_repo branch model
+    local remote_host remote_port ssh_key remote_shell
     name="$(ui_prompt "Имя" "backend")"
-    path="$(ui_prompt "Путь к репозиторию" "/home/${RUN_USER}/projects/${name}")"
+
+    if ui_yesno "Расположение" "Код на другом ПК (Windows) через SSH?
+Да = remote (сервер → ваш ПК)
+Нет = путь на этом Ubuntu-сервере"; then
+      remote_host="$(ui_prompt "SSH host" "user@192.168.1.10")"
+      remote_port="$(ui_prompt "SSH port" "22")"
+      path="$(ui_prompt "Путь на удалённом ПК" "C:/Users/${RUN_USER}/Documents/GitHub/${name}")"
+      remote_shell="$(ui_prompt "remote_shell (bash/powershell/cmd)" "bash")"
+      ssh_key="$(ui_prompt "ssh_key на сервере (пусто=default)" "")"
+    else
+      remote_host=""
+      remote_port="22"
+      remote_shell="bash"
+      ssh_key=""
+      path="$(ui_prompt "Путь на этом сервере" "/home/${RUN_USER}/projects/${name}")"
+    fi
+
     test_command="$(ui_prompt "Команда тестов" "pytest")"
     test_timeout="$(ui_prompt "Таймаут сек." "300")"
     branch="$(ui_prompt "Ветка" "main")"
@@ -477,7 +499,9 @@ ask_projects() {
       auto_pull="false"
     fi
     [[ "$test_timeout" =~ ^[0-9]+$ ]] || test_timeout="300"
-    PROJECT_LINES+=("${name}|${path}|${test_command}|${test_timeout}|${auto_pull}|${github_repo}|${branch}|${model}")
+    [[ "$remote_port" =~ ^[0-9]+$ ]] || remote_port="22"
+    # name|path|test|timeout|auto_pull|github|branch|model|remote_host|remote_port|ssh_key|remote_shell
+    PROJECT_LINES+=("${name}|${path}|${test_command}|${test_timeout}|${auto_pull}|${github_repo}|${branch}|${model}|${remote_host}|${remote_port}|${ssh_key}|${remote_shell}")
   done
 }
 
@@ -514,8 +538,9 @@ write_config() {
     else
       echo "projects:"
       local line name path test_command test_timeout auto_pull github_repo branch model
+      local remote_host remote_port ssh_key remote_shell
       for line in "${PROJECT_LINES[@]}"; do
-        IFS='|' read -r name path test_command test_timeout auto_pull github_repo branch model <<<"$line"
+        IFS='|' read -r name path test_command test_timeout auto_pull github_repo branch model remote_host remote_port ssh_key remote_shell <<<"$line"
         echo "  - name: \"$(yaml_escape "$name")\""
         echo "    path: \"$(yaml_escape "$path")\""
         echo "    test_command: \"$(yaml_escape "$test_command")\""
@@ -524,6 +549,14 @@ write_config() {
         echo "    github_repo: \"$(yaml_escape "$github_repo")\""
         echo "    branch: \"$(yaml_escape "$branch")\""
         echo "    model: \"$(yaml_escape "$model")\""
+        if [[ -n "${remote_host}" ]]; then
+          echo "    remote_host: \"$(yaml_escape "$remote_host")\""
+          echo "    remote_port: ${remote_port:-22}"
+          echo "    remote_shell: \"$(yaml_escape "${remote_shell:-bash}")\""
+          if [[ -n "${ssh_key}" ]]; then
+            echo "    ssh_key: \"$(yaml_escape "$ssh_key")\""
+          fi
+        fi
       done
     fi
     echo ""
@@ -802,12 +835,10 @@ EOF
 }
 
 main() {
-  # OverVPN-style: bash -c "..." @ install  → $0=@ $1=install
+  # bash -c "..." @ install  → $0=@ $1=install; локально: ./install.sh @ install
   if [[ "${1:-}" == "@" ]]; then
     shift
   fi
-  # When bash -c sets $0 to "@", positional may already be shifted by bash —
-  # also accept $0 == @ via BASH_ARGV edge cases: handled by explicit "@" arg above.
 
   local cmd="${1:-}"
   if [[ -n "$cmd" ]]; then

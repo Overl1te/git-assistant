@@ -38,7 +38,7 @@ git-assistant/
 
 ## Установка (одна команда)
 
-Как OverVPN — с сервера Ubuntu:
+С сервера Ubuntu:
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Overl1te/git-assistant/master/install.sh)" @ install
@@ -78,32 +78,55 @@ journalctl -u git-assistant -f
 
 ### Ручная донастройка проектов
 
-Добавить/править проекты можно и вручную в `config.yaml`:
+Добавить/править проекты в `/opt/git-assistant/config.yaml`.
+
+**Код на Windows-ПК, Assistant на Ubuntu** (через SSH):
 
 ```yaml
 projects:
   - name: "backend"
-    path: "/home/user/projects/backend"
+    path: "C:/Users/maksi/Documents/GitHub/backend"   # путь НА WINDOWS
+    remote_host: "maksi@192.168.1.10"                 # SSH к ПК
+    remote_port: 22
+    remote_shell: "bash"                             # Git Bash на Windows
+    # ssh_key: "/home/serveruser/.ssh/id_ed25519"
     test_command: "pytest"
     test_timeout: 300
     auto_pull: true
     github_repo: "username/backend"
     branch: "main"
-    model: "qwen2.5-coder:3b"
-
-  - name: "frontend"
-    path: "/home/user/projects/frontend"
-    test_command: "npm test"
-    test_timeout: 120
-    auto_pull: false
-    github_repo: "username/frontend"
-    branch: "develop"
-
-global:
-  ollama_url: "http://localhost:11434"
-  default_model: "qwen2.5-coder:3b"
-  log_file: "/var/log/git-assistant.log"
 ```
+
+**Код на самом Ubuntu-сервере:**
+
+```yaml
+projects:
+  - name: "scripts"
+    path: "/home/user/projects/scripts"
+    test_command: ""
+    test_timeout: 60
+    auto_pull: false
+    branch: "main"
+```
+
+#### Настройка Windows для remote SSH
+
+1. Установите **OpenSSH Server** (Параметры → Приложения → Дополнительные компоненты).
+2. Установите **Git for Windows** (чтобы был `git` и желательно Git Bash).
+3. Рекомендуется: в OpenSSH выставить shell на Git Bash, либо оставить `remote_shell: bash` и убедиться, что `bash` в PATH.
+4. С Ubuntu-сервера настройте вход по ключу без пароля:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_windows -N ""
+ssh-copy-id -i ~/.ssh/id_ed25519_windows.pub maksi@192.168.1.10
+# проверка:
+ssh -i ~/.ssh/id_ed25519_windows maksi@192.168.1.10 "git -C 'C:/Users/maksi/Documents/GitHub/backend' status"
+```
+
+5. ПК должен быть доступен с сервера (LAN / VPN / reverse SSH).
+6. Перезапуск: `sudo systemctl restart git-assistant`
+
+`gh` для статуса Actions остаётся на **сервере** (локально). Git/тесты/commit/push идут на Windows по SSH.
 
 Поддерживаемые примеры `test_command`: `pytest`, `npm test`, `go test ./...`, `cargo test`, `make test`.
 
@@ -258,8 +281,16 @@ C:\Users\<you>\Documents\GitHub\git-assistant
 
 ### Permission denied на path проекта
 
-- Пользователь, под которым крутится `git-assistant`, должен иметь права на каталог репозитория
-- Проверьте `path` в `config.yaml` (абсолютный путь)
+- Пользователь сервиса должен иметь права на каталог (локальные проекты)
+- Для remote: проверьте `ssh user@pc "git -C 'C:/path' status"` без пароля
+- `remote_shell: bash` — нужен Git Bash / bash в PATH на Windows
+
+### SSH remote не подключается
+
+- ПК в одной сети / VPN, пинг и `ssh user@ip` с сервера
+- OpenSSH Server запущен на Windows: `Get-Service sshd`
+- Ключ: `BatchMode=yes` — парольный ввод не спросится, нужен ключ
+- Firewall Windows: разрешить порт 22
 
 ### git push / pull требует пароль или SSH
 

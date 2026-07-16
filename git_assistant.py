@@ -80,6 +80,11 @@ class ProjectConfig:
     github_repo: str = ""
     branch: str = ""
     model: str = ""
+    # Remote execution on another machine (e.g. Windows PC) via SSH
+    remote_host: str = ""  # user@192.168.1.10
+    remote_port: int = 22
+    ssh_key: str = ""  # optional private key path on the server
+    remote_shell: str = "bash"  # bash | powershell | cmd
 
 
 @dataclass
@@ -120,6 +125,8 @@ class ProjectStatus:
     github_repo: str = ""
     auto_pull: bool = False
     test_command: str = ""
+    remote_host: str = ""
+    is_remote: bool = False
 
 
 @dataclass
@@ -185,6 +192,10 @@ def load_config(config_path: str | Path) -> AppConfig:
                 github_repo=item.get("github_repo", ""),
                 branch=item.get("branch", ""),
                 model=item.get("model", ""),
+                remote_host=str(item.get("remote_host", "") or ""),
+                remote_port=int(item.get("remote_port", 22) or 22),
+                ssh_key=str(item.get("ssh_key", "") or ""),
+                remote_shell=str(item.get("remote_shell", "bash") or "bash"),
             )
         )
 
@@ -204,25 +215,93 @@ class GitAssistant:
         if on_log:
             await on_log(message)
 
+    @staticmethod
+    def _is_remote(project: ProjectConfig) -> bool:
+        """True if git/tests must run over SSH on another host."""
+        return bool(project.remote_host and project.remote_host.strip())
+
+    @staticmethod
+    def _bash_quote(value: str) -> str:
+        """Safe single-quote for bash -lc."""
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+
+    @staticmethod
+    def _ps_quote(value: str) -> str:
+        """Safe single-quote for PowerShell."""
+        return "'" + value.replace("'", "''") + "'"
+
+    def _ssh_prefix(self, project: ProjectConfig) -> list[str]:
+        """Base ssh argv for a remote project."""
+        cmd = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+        ]
+        if project.ssh_key:
+            cmd.extend(["-i", project.ssh_key])
+        if project.remote_port and int(project.remote_port) != 22:
+            cmd.extend(["-p", str(project.remote_port)])
+        cmd.append(project.remote_host.strip())
+        return cmd
+
+    def _build_remote_argv(self, project: ProjectConfig, args: list[str], cwd: str) -> list[str]:
+        """Wrap a command so it runs on the remote host in project.path."""
+        shell = (project.remote_shell or "bash").strip().lower()
+        ssh = self._ssh_prefix(project)
+
+        if shell == "powershell":
+            parts = " ".join(self._ps_quote(a) for a in args)
+            ps = f"Set-Location -LiteralPath {self._ps_quote(cwd)}; {parts}"
+            return ssh + ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps]
+
+        if shell == "cmd":
+            win_path = cwd.replace("/", "\\")
+            joined = " ".join(f'"{a}"' if ((" " in a) or ("&" in a)) else a for a in args)
+            remote = f'cd /d "{win_path}" && {joined}'
+            return ssh + ["cmd", "/c", remote]
+
+        # bash (Git Bash on Windows, or Linux remote)
+        if args and args[0] == "git":
+            remote_cmd = (
+                "git -C "
+                + self._bash_quote(cwd)
+                + " "
+                + " ".join(self._bash_quote(a) for a in args[1:])
+            )
+        else:
+            remote_cmd = (
+                "cd "
+                + self._bash_quote(cwd)
+                + " && "
+                + " ".join(self._bash_quote(a) for a in args)
+            )
+        return ssh + ["bash", "-lc", remote_cmd]
+
     async def _run_cmd(
         self,
         args: list[str],
-        cwd: str,
+        cwd: Optional[str] = None,
         timeout: Optional[float] = None,
         env: Optional[dict[str, str]] = None,
     ) -> tuple[int, str, str]:
-        """Run a subprocess asynchronously and return (code, stdout, stderr)."""
+        """Run a local subprocess asynchronously and return (code, stdout, stderr)."""
         merged_env = os.environ.copy()
         if env:
             merged_env.update(env)
 
-        process = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=merged_env,
-        )
+        kwargs: dict[str, Any] = {
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+            "env": merged_env,
+        }
+        if cwd:
+            kwargs["cwd"] = cwd
+
+        process = await asyncio.create_subprocess_exec(*args, **kwargs)
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
                 process.communicate(),
@@ -238,6 +317,18 @@ class GitAssistant:
         code = process.returncode if process.returncode is not None else -1
         return code, stdout, stderr
 
+    async def _run_project_cmd(
+        self,
+        project: ProjectConfig,
+        args: list[str],
+        timeout: Optional[float] = None,
+    ) -> tuple[int, str, str]:
+        """Run a command in the project directory (local or via SSH)."""
+        if self._is_remote(project):
+            argv = self._build_remote_argv(project, args, project.path)
+            return await self._run_cmd(argv, cwd=None, timeout=timeout)
+        return await self._run_cmd(args, cwd=project.path, timeout=timeout)
+
     async def get_status(self, project: ProjectConfig) -> ProjectStatus:
         """Return current branch and whether the working tree has changes."""
         status = ProjectStatus(
@@ -247,31 +338,44 @@ class GitAssistant:
             github_repo=project.github_repo,
             auto_pull=project.auto_pull,
             test_command=project.test_command,
+            remote_host=project.remote_host,
+            is_remote=self._is_remote(project),
         )
 
-        root = Path(project.path)
-        if not root.exists():
-            status.error = f"Path does not exist: {project.path}"
-            return status
-        if not (root / ".git").exists():
-            status.error = f"Not a git repository: {project.path}"
-            return status
+        if not self._is_remote(project):
+            root = Path(project.path)
+            if not root.exists():
+                status.error = f"Path does not exist: {project.path}"
+                return status
+            if not (root / ".git").exists():
+                status.error = f"Not a git repository: {project.path}"
+                return status
 
         try:
-            code, branch_out, err = await self._run_cmd(
+            code, probe, err = await self._run_project_cmd(
+                project,
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                timeout=45,
+            )
+            if code != 0 or "true" not in probe.lower():
+                where = f" via SSH {project.remote_host}" if self._is_remote(project) else ""
+                status.error = (err or probe or "Not a git repository").strip() + where
+                return status
+
+            code, branch_out, err = await self._run_project_cmd(
+                project,
                 ["git", "branch", "--show-current"],
-                cwd=project.path,
-                timeout=30,
+                timeout=45,
             )
             if code != 0:
                 status.error = err.strip() or "Failed to read branch"
                 return status
             status.branch = branch_out.strip() or "(detached)"
 
-            code, porcelain, err = await self._run_cmd(
+            code, porcelain, err = await self._run_project_cmd(
+                project,
                 ["git", "status", "--porcelain"],
-                cwd=project.path,
-                timeout=30,
+                timeout=45,
             )
             if code != 0:
                 status.error = err.strip() or "Failed to read status"
@@ -294,15 +398,15 @@ class GitAssistant:
             ["git", "diff"],
             ["git", "diff", "--cached"],
         ):
-            code, out, _ = await self._run_cmd(args, cwd=project.path, timeout=60)
+            code, out, _ = await self._run_project_cmd(project, args, timeout=90)
             if code == 0 and out.strip():
                 parts.append(out)
         diff = "\n".join(parts).strip()
         if not diff:
-            code, out, _ = await self._run_cmd(
+            code, out, _ = await self._run_project_cmd(
+                project,
                 ["git", "status", "--short"],
-                cwd=project.path,
-                timeout=30,
+                timeout=45,
             )
             diff = out.strip() or "(no diff available)"
         if len(diff) > max_chars:
@@ -381,10 +485,16 @@ class GitAssistant:
             f"[{project.name}] Running tests: {project.test_command} (timeout={project.test_timeout}s)",
         )
         try:
-            args = shlex.split(project.test_command)
-            code, stdout, stderr = await self._run_cmd(
+            posix = True
+            if self._is_remote(project) and (project.remote_shell or "bash").lower() in (
+                "cmd",
+                "powershell",
+            ):
+                posix = False
+            args = shlex.split(project.test_command, posix=posix)
+            code, stdout, stderr = await self._run_project_cmd(
+                project,
                 args,
-                cwd=project.path,
                 timeout=float(project.test_timeout),
             )
             output = (stdout + ("\n" + stderr if stderr else "")).strip()
@@ -421,7 +531,7 @@ class GitAssistant:
             args = ["git", "pull", "--rebase"]
             if branch:
                 args.extend(["origin", branch])
-            code, stdout, stderr = await self._run_cmd(args, cwd=project.path, timeout=180)
+            code, stdout, stderr = await self._run_project_cmd(project, args, timeout=180)
             combined = (stdout + "\n" + stderr).strip()
             if code != 0:
                 if "conflict" in combined.lower() or "CONFLICT" in combined:
@@ -430,7 +540,7 @@ class GitAssistant:
                         f"[{project.name}] Rebase conflict detected, aborting",
                         logging.ERROR,
                     )
-                    await self._run_cmd(["git", "rebase", "--abort"], cwd=project.path, timeout=30)
+                    await self._run_project_cmd(project, ["git", "rebase", "--abort"], timeout=45)
                     return False, combined or "Rebase conflict"
                 await self._emit(on_log, f"[{project.name}] Pull failed: {combined}", logging.ERROR)
                 return False, combined or "git pull failed"
@@ -443,10 +553,10 @@ class GitAssistant:
 
     async def _has_unmerged(self, project: ProjectConfig) -> bool:
         """Return True if the index has unmerged (conflict) paths."""
-        code, out, _ = await self._run_cmd(
+        code, out, _ = await self._run_project_cmd(
+            project,
             ["git", "diff", "--name-only", "--diff-filter=U"],
-            cwd=project.path,
-            timeout=30,
+            timeout=45,
         )
         return code == 0 and bool(out.strip())
 
@@ -467,15 +577,15 @@ class GitAssistant:
                 return False, "Unresolved merge/rebase conflicts"
 
             await self._emit(on_log, f"[{project.name}] git add .")
-            code, _, err = await self._run_cmd(["git", "add", "."], cwd=project.path, timeout=60)
+            code, _, err = await self._run_project_cmd(project, ["git", "add", "."], timeout=90)
             if code != 0:
                 return False, err or "git add failed"
 
             await self._emit(on_log, f"[{project.name}] git commit")
-            code, out, err = await self._run_cmd(
+            code, out, err = await self._run_project_cmd(
+                project,
                 ["git", "commit", "-m", message],
-                cwd=project.path,
-                timeout=60,
+                timeout=90,
             )
             if code != 0:
                 combined = (out + "\n" + err).strip()
@@ -493,7 +603,7 @@ class GitAssistant:
             if project.branch:
                 push_args.extend(["-u", "origin", project.branch])
             await self._emit(on_log, f"[{project.name}] {' '.join(push_args)}")
-            code, out, err = await self._run_cmd(push_args, cwd=project.path, timeout=180)
+            code, out, err = await self._run_project_cmd(project, push_args, timeout=180)
             combined = (out + "\n" + err).strip()
             if code != 0:
                 await self._emit(on_log, f"[{project.name}] Push failed: {combined}", logging.ERROR)
@@ -507,9 +617,17 @@ class GitAssistant:
             return False, msg
 
     async def has_github_workflows(self, project: ProjectConfig) -> bool:
-        """Check whether .github/workflows exists."""
-        workflows = Path(project.path) / ".github" / "workflows"
-        return workflows.is_dir() and any(workflows.iterdir())
+        """Check whether .github/workflows exists (local or remote)."""
+        if not self._is_remote(project):
+            workflows = Path(project.path) / ".github" / "workflows"
+            return workflows.is_dir() and any(workflows.iterdir())
+
+        code, out, _ = await self._run_project_cmd(
+            project,
+            ["git", "ls-files", ".github/workflows"],
+            timeout=45,
+        )
+        return code == 0 and bool(out.strip())
 
     async def check_actions(
         self,
@@ -673,6 +791,11 @@ class GitAssistant:
         result = JobResult(skipped_tests=skip_tests)
         mode = "Force Commit" if skip_tests else "Smart Commit"
         await self._emit(on_log, f"[{project.name}] === {mode} started ===")
+        if self._is_remote(project):
+            await self._emit(
+                on_log,
+                f"[{project.name}] Remote SSH: {project.remote_host} ({project.remote_shell})",
+            )
 
         status = await self.get_status(project)
         if status.error:
@@ -686,7 +809,7 @@ class GitAssistant:
 
         await self._emit(
             on_log,
-            f"[{project.name}] Branch={status.branch}, changes={status.change_count}",
+            f"[{project.name}] Branch={status.branch}, changes={status.change_count}, path={project.path}",
         )
 
         if project.auto_pull:

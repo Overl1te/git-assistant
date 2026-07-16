@@ -1,9 +1,15 @@
 # Git Assistant with AI — project configuration
-# Edit paths and github_repo for your environment.
+# path = путь к репо НА МАШИНЕ, где лежит код
+# remote_host = если код на другом ПК (Windows) — SSH user@host
 
 projects:
+  # Пример: репозиторий на Windows-ПК, Assistant на Ubuntu
   - name: "backend"
-    path: "/home/user/projects/backend"
+    path: "C:/Users/maksi/Documents/GitHub/backend"
+    remote_host: "maksi@192.168.1.10"
+    remote_port: 22
+    remote_shell: "bash"          # bash (Git Bash) | powershell | cmd
+    # ssh_key: "/home/user/.ssh/id_ed25519_windows"
     test_command: "pytest"
     test_timeout: 300
     auto_pull: true
@@ -11,17 +17,16 @@ projects:
     branch: "main"
     model: "qwen2.5-coder:3b"
 
-  - name: "frontend"
-    path: "/home/user/projects/frontend"
-    test_command: "npm test"
-    test_timeout: 120
+  # Пример: локальный проект на самом сервере Ubuntu
+  - name: "scripts"
+    path: "/home/user/projects/scripts"
+    test_command: ""
+    test_timeout: 60
     auto_pull: false
-    github_repo: "username/frontend"
-    branch: "develop"
+    github_repo: ""
+    branch: "main"
 
 global:
   ollama_url: "http://localhost:11434"
   default_model: "qwen2.5-coder:3b"
-  # On Ubuntu: /var/log/git-assistant.log
-  # On Windows (dev): relative path next to the app
   log_file: "./git-assistant.log"
