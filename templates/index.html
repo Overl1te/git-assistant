@@ -43,10 +43,13 @@
         <section class="view" id="view-projects">
           <div class="projects" id="projects"></div>
 
-          <section class="panel" id="log-panel">
+          <section class="panel log-panel" id="log-panel">
             <div class="panel-header">
-              <h3>Live-логи</h3>
-              <span class="panel-sub" id="job-label">Нет активной задачи</span>
+              <div>
+                <h3>Live-логи</h3>
+                <span class="panel-sub" id="job-label">Нет активной задачи</span>
+              </div>
+              <button type="button" class="btn btn-ghost btn-sm" id="clear-log" title="Очистить">Очистить</button>
             </div>
             <pre class="log-view" id="log-view">Ожидание действий…</pre>
             <div class="result-grid" id="result-panel" hidden>
@@ -281,14 +284,25 @@
     });
 
     function badgeFor(p) {
-      if (p.loading) return `<span class="badge running">проверка…</span>`;
+      if (p.loading) {
+        return `<span class="badge running"><span class="pulse-dot"></span>проверка</span>`;
+      }
       if (p.error) return `<span class="badge error">ошибка</span>`;
-      if (p.has_changes) return `<span class="badge dirty">изменения (${p.change_count})</span>`;
+      if (p.has_changes) {
+        return `<span class="badge dirty">${p.change_count} изм.</span>`;
+      }
       return `<span class="badge clean">чисто</span>`;
     }
 
     function healthy(p) {
       return !p.loading && !p.error;
+    }
+
+    function statusTone(p) {
+      if (p.loading) return "tone-loading";
+      if (p.error) return "tone-error";
+      if (p.has_changes) return "tone-dirty";
+      return "tone-ok";
     }
 
     function errorBlockHtml(p) {
@@ -297,37 +311,70 @@
       const diag = p.ssh_diag;
       let steps = "";
       if (diag && diag.steps && diag.steps.length) {
-        steps = `<ol class="error-steps">${diag.steps.map((s) =>
-          `<li><strong>${esc(s.name)}</strong>: ${s.ok ? "ok" : "fail"} — ${esc(s.detail || "")}</li>`
-        ).join("")}</ol>`;
+        steps = `<details class="error-details"><summary>Детали проверки</summary><ol class="error-steps">${diag.steps.map((s) =>
+          `<li><span class="step-ok-${s.ok ? "yes" : "no"}">${s.ok ? "ok" : "fail"}</span> <strong>${esc(s.name)}</strong> — ${esc(s.detail || "")}</li>`
+        ).join("")}</ol></details>`;
       }
-      const title = diag && !diag.ok ? "SSH / git" : "Ошибка";
+      const title = diag && !diag.ok ? "Проблема с SSH / git" : "Ошибка";
       const bodyHint = (diag && diag.hint) || hint;
       return `
         <div class="alert">
           <p class="alert-title">${esc(title)}</p>
           <p class="alert-body">${esc(p.error)}</p>
-          ${steps}
           ${bodyHint ? `<p class="alert-hint">${esc(bodyHint)}</p>` : ""}
+          ${steps}
         </div>`;
+    }
+
+    function factsHtml(p, cfg) {
+      if (p.loading) {
+        return `
+          <div class="facts skeleton-facts">
+            <div class="skel"></div><div class="skel"></div><div class="skel"></div><div class="skel"></div>
+          </div>`;
+      }
+      const items = [
+        ["Ветка", p.branch || cfg.branch || "—"],
+        ["Путь", p.path],
+      ];
+      if (p.is_remote) {
+        items.push(["Host", p.remote_host]);
+        items.push(["Shell", cfg.remote_shell || "—"]);
+      }
+      items.push(["Тесты", cfg.test_command || "—"]);
+      items.push(["Repo", p.github_repo || "—"]);
+      return `<div class="facts">${items.map(([k, v]) =>
+        `<div class="fact"><div class="fact-label">${esc(k)}</div><div class="fact-value" title="${esc(v)}">${esc(v)}</div></div>`
+      ).join("")}</div>`;
     }
 
     function renderProjects(list) {
       projectsCache = list || [];
       const n = projectsCache.length;
       const probing = projectsCache.some((p) => p.loading);
+      const dirty = projectsCache.filter((p) => !p.loading && !p.error && p.has_changes).length;
+      const broken = projectsCache.filter((p) => !p.loading && p.error).length;
       document.getElementById("view-sub").textContent =
         currentView === "projects"
           ? (n
-              ? `${n} проект${n === 1 ? "" : n < 5 ? "а" : "ов"}${probing ? " · обновляю статусы…" : ""}`
+              ? [
+                  `${n} проект${n === 1 ? "" : n < 5 ? "а" : "ов"}`,
+                  dirty ? `${dirty} с изменениями` : null,
+                  broken ? `${broken} с ошибкой` : null,
+                  probing ? "обновляю…" : null,
+                ].filter(Boolean).join(" · ")
               : "Пока нет проектов")
           : titles[currentView][1];
+
+      const refreshBtn = document.getElementById("refresh-all");
+      if (refreshBtn) refreshBtn.classList.toggle("is-spinning", probing);
 
       if (!projectsCache.length) {
         projectsEl.innerHTML = `
           <div class="empty">
+            <div class="empty-icon" aria-hidden="true"></div>
             <h3>Пока нет проектов</h3>
-            <p>Добавь локальный репозиторий на сервере или remote по SSH с Windows.</p>
+            <p>Добавь локальный репозиторий на сервере или remote по SSH с Windows — дальше статусы и SSH подтянутся сами.</p>
             <button type="button" class="btn btn-primary" id="empty-add">+ Добавить проект</button>
           </div>`;
         document.getElementById("empty-add").onclick = () => openDrawer();
@@ -339,32 +386,37 @@
         const ok = healthy(p);
         const canCommit = ok && p.has_changes;
         const canPull = ok;
+        const hintCommit = p.loading
+          ? "Идёт проверка статуса"
+          : p.error
+            ? "Сначала почини доступ"
+            : (!p.has_changes ? "Нет локальных изменений" : "Тесты → AI commit → push");
         return `
-        <article class="card ${p.loading ? "probing" : ""}" data-project="${esc(p.name)}" id="project-${esc(p.name)}">
+        <article class="card ${statusTone(p)} ${p.loading ? "probing" : ""}" data-project="${esc(p.name)}" id="project-${esc(p.name)}">
+          <div class="card-accent" aria-hidden="true"></div>
           <div class="card-head">
-            <h3 class="card-title">${esc(p.name)}</h3>
+            <div class="card-title-wrap">
+              <h3 class="card-title">${esc(p.name)}</h3>
+              <p class="card-sub">${p.is_remote ? `remote · ${esc(p.remote_host || "")}` : "локальный репозиторий на сервере"}</p>
+            </div>
             <div class="card-badges">
               ${p.is_remote ? `<span class="badge remote">SSH</span>` : `<span class="badge">local</span>`}
               ${badgeFor(p)}
             </div>
           </div>
-          <div class="facts">
-            <div class="fact"><div class="fact-label">Ветка</div><div class="fact-value">${esc(p.branch || cfg.branch || "—")}</div></div>
-            <div class="fact"><div class="fact-label">Путь</div><div class="fact-value">${esc(p.path)}</div></div>
-            ${p.is_remote ? `<div class="fact"><div class="fact-label">Host</div><div class="fact-value">${esc(p.remote_host)}</div></div>` : ""}
-            ${p.is_remote ? `<div class="fact"><div class="fact-label">Shell</div><div class="fact-value">${esc(cfg.remote_shell || "—")}</div></div>` : ""}
-            <div class="fact"><div class="fact-label">Тесты</div><div class="fact-value">${esc(cfg.test_command || "—")}</div></div>
-            <div class="fact"><div class="fact-label">Repo</div><div class="fact-value">${esc(p.github_repo || "—")}</div></div>
-          </div>
+          ${factsHtml(p, cfg)}
           ${errorBlockHtml(p)}
           <div class="card-actions">
-            <button type="button" class="btn btn-primary" data-action="smart-commit" ${canCommit ? "" : "disabled"}>Smart Commit</button>
-            <button type="button" class="btn btn-ghost" data-action="pull" ${canPull ? "" : "disabled"}>Pull</button>
-            <button type="button" class="btn btn-danger btn-sm" data-action="force-commit" ${canCommit ? "" : "disabled"}>Force</button>
-            <span class="actions-sep"></span>
-            ${p.is_remote ? `<button type="button" class="btn btn-ghost btn-sm" data-action="test-ssh">SSH</button>` : ""}
-            <button type="button" class="btn btn-ghost btn-sm" data-action="refresh">↻</button>
-            <button type="button" class="btn btn-ghost btn-sm" data-action="edit">Изменить</button>
+            <div class="actions-primary">
+              <button type="button" class="btn btn-primary" data-action="smart-commit" title="${esc(hintCommit)}" ${canCommit ? "" : "disabled"}>Smart Commit</button>
+              <button type="button" class="btn btn-ghost" data-action="pull" title="git pull --rebase" ${canPull ? "" : "disabled"}>Pull</button>
+            </div>
+            <div class="actions-secondary">
+              <button type="button" class="btn btn-ghost btn-sm" data-action="force-commit" title="Коммит без тестов" ${canCommit ? "" : "disabled"}>Force</button>
+              ${p.is_remote ? `<button type="button" class="btn btn-ghost btn-sm" data-action="test-ssh" title="Проверить SSH">SSH</button>` : ""}
+              <button type="button" class="btn btn-ghost btn-sm btn-icon" data-action="refresh" title="Обновить статус">↻</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-action="edit" title="Изменить проект">Изменить</button>
+            </div>
           </div>
         </article>`;
       }).join("");
@@ -626,6 +678,12 @@
       document.getElementById("test-toggle").hidden = true;
       document.getElementById("test-toggle").textContent = "Показать всё";
     }
+
+    document.getElementById("clear-log").onclick = () => {
+      clearLog();
+      logView.textContent = "Ожидание действий…";
+      jobLabel.textContent = "Нет активной задачи";
+    };
 
     function setBadge(el, text, cls) {
       el.className = "badge " + (cls || "");
