@@ -36,28 +36,36 @@ git-assistant/
 
 ---
 
-## Установка (рекомендуется — консольный TUI)
+## Установка (одна команда)
 
-На Ubuntu 22.04+ достаточно одного скрипта — цветное меню в терминале (как панель управления):
+Как OverVPN — с сервера Ubuntu:
 
 ```bash
-cd /opt/git-assistant   # или путь к клону
-chmod +x install.sh
-./install.sh
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Overl1te/git-assistant/master/install.sh)" @ install
 ```
 
-Управление: цифры `[1]`…`[N]`, `[0]` — назад/нет, Enter — подтвердить.
+Скрипт:
+1. Кладёт проект в `/opt/git-assistant`
+2. Ставит зависимости, Ollama/gh (по вопросам)
+3. Пишет `config.yaml`, systemd, CLI `git-assistant`
+4. Консольный TUI (ввод с `/dev/tty` — не зависает на Enter)
 
-Мастер устанавливает и настраивает:
+Управление после установки:
 
-1. Системные пакеты (`python3-venv`, `git`, `whiptail`, …)
-2. Python venv + зависимости из `requirements.txt`
-3. `config.yaml` — проекты через TUI (путь, тесты, ветка, repo)
-4. Ollama + скачивание модели (по желанию)
-5. GitHub CLI (`gh`) + подсказка `gh auth login` (вместо токена)
-6. systemd-сервис `git-assistant` (enable + start)
-7. Порт в UFW (если firewall активен и выбран LAN-доступ)
-8. Лог `/var/log/git-assistant.log`
+```bash
+git-assistant          # меню
+git-assistant status
+git-assistant restart
+git-assistant logs
+git-assistant uninstall
+```
+
+Переустановка / мастер заново:
+
+```bash
+sudo git-assistant install
+# или снова one-liner с curl
+```
 
 После установки:
 
@@ -67,8 +75,6 @@ systemctl status git-assistant
 # SSH:  ssh -L 8080:127.0.0.1:8080 user@server
 journalctl -u git-assistant -f
 ```
-
-Переустановка / смена настроек: снова запустите `./install.sh` (перезапишет config, env и unit).
 
 ### Ручная донастройка проектов
 
