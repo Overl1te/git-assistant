@@ -298,7 +298,7 @@ class GitAssistant:
             "-o",
             "BatchMode=yes",
             "-o",
-            "ConnectTimeout=15",
+            "ConnectTimeout=8",
             "-o",
             "StrictHostKeyChecking=accept-new",
         ]
@@ -419,8 +419,8 @@ class GitAssistant:
                 timeout=45,
             )
             if code != 0 or "true" not in probe.lower():
-                where = f" via SSH {project.remote_host}" if self._is_remote(project) else ""
-                status.error = (err or probe or "Not a git repository").strip() + where
+                raw = (err or probe or "Not a git repository").strip()
+                status.error = self._format_remote_error(project, raw)
                 return status
 
             code, branch_out, err = await self._run_project_cmd(
@@ -429,7 +429,9 @@ class GitAssistant:
                 timeout=45,
             )
             if code != 0:
-                status.error = err.strip() or "Failed to read branch"
+                status.error = self._format_remote_error(
+                    project, err.strip() or "Failed to read branch"
+                )
                 return status
             status.branch = branch_out.strip() or "(detached)"
 
@@ -439,17 +441,120 @@ class GitAssistant:
                 timeout=45,
             )
             if code != 0:
-                status.error = err.strip() or "Failed to read status"
+                status.error = self._format_remote_error(
+                    project, err.strip() or "Failed to read status"
+                )
                 return status
 
             lines = [ln for ln in porcelain.splitlines() if ln.strip()]
             status.change_count = len(lines)
             status.has_changes = status.change_count > 0
         except Exception as exc:  # noqa: BLE001
-            status.error = str(exc)
+            status.error = self._format_remote_error(project, str(exc))
             self.logger.exception("get_status failed for %s", project.name)
 
         return status
+
+    def _format_remote_error(self, project: ProjectConfig, message: str) -> str:
+        """Annotate SSH-related failures with host context."""
+        text = (message or "").strip()
+        if not self._is_remote(project):
+            return text
+        if f"via SSH {project.remote_host}" not in text:
+            text = f"{text} via SSH {project.remote_host}"
+        return text
+
+    @staticmethod
+    def ssh_hint_for_error(error: Optional[str]) -> str:
+        """Human hint for common SSH failures (UI / API)."""
+        low = (error or "").lower()
+        if not low:
+            return ""
+        if "timed out" in low or "connection timed out" in low:
+            return (
+                "Сервер не достучался до Windows по SSH (порт 22). "
+                "На ПК: служба OpenSSH Server должна быть запущена; "
+                "в Firewall разрешён входящий TCP 22; IP должен быть доступен с сервера. "
+                "Проверка с сервера: ssh -v -o ConnectTimeout=5 user@ip"
+            )
+        if "permission denied" in low or "publickey" in low:
+            return (
+                "Хост отвечает, но ключ/логин не принят. "
+                "Нужен вход по ключу без пароля (BatchMode)."
+            )
+        if "connection refused" in low or "refused" in low:
+            return (
+                "Connection refused — на Windows никто не слушает порт 22. "
+                "Установите и запустите OpenSSH Server."
+            )
+        return ""
+
+    async def doctor(self) -> dict[str, Any]:
+        """Collect environment health checks for the System page."""
+        checks: list[dict[str, Any]] = []
+
+        def add(name: str, ok: bool, detail: str = "") -> None:
+            checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+        add("git", shutil.which("git") is not None, shutil.which("git") or "not found")
+        add("ssh", shutil.which("ssh") is not None, shutil.which("ssh") or "not found")
+        add("gh", shutil.which("gh") is not None, shutil.which("gh") or "not found")
+        add("ollama_cli", shutil.which("ollama") is not None, shutil.which("ollama") or "not found")
+
+        ollama_url = self.config.global_.ollama_url.rstrip("/")
+        ollama_ok = False
+        ollama_detail = ollama_url
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{ollama_url}/api/tags")
+                ollama_ok = resp.status_code == 200
+                if ollama_ok:
+                    models = [m.get("name", "") for m in (resp.json().get("models") or [])]
+                    default = self.config.global_.default_model
+                    has_default = any(default == m or m.startswith(default + ":") or default.startswith(m) for m in models)
+                    ollama_detail = (
+                        f"{ollama_url} · models={len(models)}"
+                        + (f" · default={default}{' ✓' if has_default else ' (не скачана?)'}" if default else "")
+                    )
+                else:
+                    ollama_detail = f"{ollama_url} · HTTP {resp.status_code}"
+        except Exception as exc:  # noqa: BLE001
+            ollama_detail = f"{ollama_url} · {exc}"
+        add("ollama_api", ollama_ok, ollama_detail)
+
+        gh_auth_ok = False
+        gh_auth_detail = "gh not installed"
+        if shutil.which("gh"):
+            code, out, err = await self._run_cmd(["gh", "auth", "status"], timeout=15)
+            gh_auth_ok = code == 0
+            gh_auth_detail = (out or err or "").strip().splitlines()[0] if (out or err) else f"exit {code}"
+        add("gh_auth", gh_auth_ok, gh_auth_detail)
+
+        remotes = [
+            {"name": p.name, "host": p.remote_host, "shell": p.remote_shell}
+            for p in self.config.projects
+            if self._is_remote(p)
+        ]
+        add(
+            "projects",
+            True,
+            f"{len(self.config.projects)} total, {len(remotes)} remote SSH",
+        )
+
+        ok_count = sum(1 for c in checks if c["ok"])
+        critical = ("git", "ssh", "ollama_api")
+        critical_ok = all(c["ok"] for c in checks if c["name"] in critical)
+        return {
+            "ok": critical_ok,
+            "summary": f"{ok_count}/{len(checks)} checks ok",
+            "checks": checks,
+            "settings": {
+                "ollama_url": self.config.global_.ollama_url,
+                "default_model": self.config.global_.default_model,
+                "log_file": self.config.global_.log_file,
+            },
+            "remote_projects": remotes,
+        }
 
     async def get_diff(self, project: ProjectConfig, max_chars: int = 12000) -> str:
         """Collect unstaged + staged diff for the AI prompt."""
@@ -826,6 +931,100 @@ class GitAssistant:
         if status in ("error", "unknown"):
             return status
         return status or "unknown"
+
+    async def test_remote_connection(
+        self,
+        project: ProjectConfig,
+    ) -> dict[str, Any]:
+        """Probe SSH + git access for a remote project."""
+        result: dict[str, Any] = {
+            "ok": False,
+            "steps": [],
+            "hint": "",
+        }
+        if not self._is_remote(project):
+            result["steps"].append({"name": "remote", "ok": False, "detail": "Проект не remote"})
+            result["hint"] = "Включите SSH remote в настройках проекта"
+            return result
+
+        # 1) plain SSH echo
+        ssh = self._ssh_prefix(project)
+        try:
+            code, out, err = await self._run_cmd(
+                ssh + ["echo", "GIT_ASSISTANT_SSH_OK"],
+                cwd=None,
+                timeout=20,
+            )
+            detail = (out or err or "").strip()
+            ok = code == 0 and "GIT_ASSISTANT_SSH_OK" in detail
+            result["steps"].append(
+                {
+                    "name": "ssh",
+                    "ok": ok,
+                    "detail": detail or f"exit {code}",
+                }
+            )
+            if not ok:
+                result["hint"] = self.ssh_hint_for_error(detail + " " + err) or (
+                    "SSH до хоста не прошёл. См. вывод шага ssh."
+                )
+                return result
+        except Exception as exc:  # noqa: BLE001
+            result["steps"].append({"name": "ssh", "ok": False, "detail": str(exc)})
+            result["hint"] = str(exc)
+            return result
+
+        # 2) git inside project path
+        try:
+            code, out, err = await self._run_project_cmd(
+                project,
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                timeout=30,
+            )
+            detail = (out or err or "").strip()
+            ok = code == 0 and "true" in detail.lower()
+            result["steps"].append(
+                {
+                    "name": "git",
+                    "ok": ok,
+                    "detail": detail or f"exit {code}",
+                }
+            )
+            if not ok:
+                result["hint"] = (
+                    f"SSH ок, но путь не git-репозиторий или недоступен: {project.path}. "
+                    "Проверьте path и remote_shell (для Windows обычно powershell)."
+                )
+                return result
+        except Exception as exc:  # noqa: BLE001
+            result["steps"].append({"name": "git", "ok": False, "detail": str(exc)})
+            result["hint"] = str(exc)
+            return result
+
+        # 3) branch + dirty summary
+        try:
+            status = await self.get_status(project)
+            result["steps"].append(
+                {
+                    "name": "status",
+                    "ok": not bool(status.error),
+                    "detail": (
+                        f"branch={status.branch}, changes={status.change_count}"
+                        if not status.error
+                        else status.error
+                    ),
+                }
+            )
+            result["ok"] = not bool(status.error)
+            if status.error:
+                result["hint"] = status.error
+            else:
+                result["hint"] = "SSH и git работают"
+        except Exception as exc:  # noqa: BLE001
+            result["steps"].append({"name": "status", "ok": False, "detail": str(exc)})
+            result["hint"] = str(exc)
+
+        return result
 
     async def pull_only(
         self,

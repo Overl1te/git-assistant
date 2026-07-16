@@ -389,6 +389,11 @@ fetch_repo() {
   rm -rf "$tmp"
 
   [[ -f "${APP_DIR}/app.py" ]] || die "Не удалось загрузить app.py в ${APP_DIR}"
+  # Never keep repo example as live config unless missing
+  if [[ ! -f "$CONFIG_FILE" && -f "${APP_DIR}/config.example.yaml" ]]; then
+    cp -a "${APP_DIR}/config.example.yaml" "$CONFIG_FILE"
+  fi
+  # If git brought back a tracked config.yaml from old releases, don't trust it as "user config"
   chown -R "${RUN_UID}:${RUN_GID}" "$APP_DIR"
 }
 
@@ -838,39 +843,42 @@ update_code_tree() {
   local backup_dir="$1"
   mkdir -p "$APP_DIR"
 
+  # Always snapshot live config before touching the tree
+  if [[ -f "$CONFIG_FILE" ]]; then
+    cp -a "$CONFIG_FILE" "${backup_dir}/config.yaml"
+  fi
+
   if [[ -d "${APP_DIR}/.git" ]]; then
     log_step "git fetch/reset ${DEFAULT_BRANCH}"
-    # keep local config out of reset damage
-    [[ -f "$CONFIG_FILE" ]] && cp -a "$CONFIG_FILE" "${backup_dir}/config.yaml"
     git -C "$APP_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || true
     git -C "$APP_DIR" fetch --depth 1 origin "$DEFAULT_BRANCH"
     git -C "$APP_DIR" checkout -B "$DEFAULT_BRANCH" "origin/${DEFAULT_BRANCH}"
-    # restore config after hard update of tree
-    [[ -f "${backup_dir}/config.yaml" ]] && cp -a "${backup_dir}/config.yaml" "$CONFIG_FILE"
   else
     log_step "Скачивание архива ${DEFAULT_BRANCH}"
     local tmp extracted
     tmp="$(mktemp -d)"
-    [[ -f "$CONFIG_FILE" ]] && cp -a "$CONFIG_FILE" "${backup_dir}/config.yaml"
     curl -fsSL "${REPO_URL%.git}/archive/refs/heads/${DEFAULT_BRANCH}.tar.gz" -o "${tmp}/src.tgz"
     tar -xzf "${tmp}/src.tgz" -C "$tmp"
     extracted="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -n1)"
-    # copy code but do not wipe entire APP_DIR (preserve .venv)
     rsync -a --delete \
       --exclude '.venv' \
       --exclude 'config.yaml' \
       --exclude 'git-assistant.log' \
       --exclude '*.log' \
       "${extracted}/" "${APP_DIR}/" 2>/dev/null || {
-        # fallback without rsync
         find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name '.venv' ! -name 'config.yaml' ! -name '*.log' -exec rm -rf {} +
         cp -a "${extracted}/." "$APP_DIR/"
       }
-    [[ -f "${backup_dir}/config.yaml" ]] && cp -a "${backup_dir}/config.yaml" "$CONFIG_FILE"
     rm -rf "$tmp"
   fi
 
-  # always refresh install.sh from tree or raw
+  # Restore user config (never leave example/demo projects as live config after update)
+  if [[ -f "${backup_dir}/config.yaml" ]]; then
+    cp -a "${backup_dir}/config.yaml" "$CONFIG_FILE"
+  elif [[ ! -f "$CONFIG_FILE" && -f "${APP_DIR}/config.example.yaml" ]]; then
+    cp -a "${APP_DIR}/config.example.yaml" "$CONFIG_FILE"
+  fi
+
   if [[ -f "${APP_DIR}/install.sh" ]]; then
     chmod 755 "${APP_DIR}/install.sh"
   else
@@ -879,7 +887,6 @@ update_code_tree() {
 
   detect_run_user
   chown -R "${RUN_UID}:${RUN_GID}" "$APP_DIR" 2>/dev/null || true
-  # keep root-owned install.sh executable for sudo cli
   chmod 755 "${APP_DIR}/install.sh" 2>/dev/null || true
 }
 

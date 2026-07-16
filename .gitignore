@@ -1,0 +1,9 @@
+# Runtime config (created by installer / web UI) — not committed
+config.yaml
+*.yaml.tmp
+.venv/
+__pycache__/
+*.pyc
+git-assistant.log
+*.log
+VERSION

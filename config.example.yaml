@@ -1,0 +1,20 @@
+# Example config — copy to config.yaml on first install (installer does this).
+# Do NOT put secrets here. Runtime file is /opt/git-assistant/config.yaml (gitignored).
+
+projects:
+  - name: "backend"
+    path: "C:/Users/you/Documents/GitHub/backend"
+    remote_host: "you@192.168.0.10"
+    remote_port: 22
+    remote_shell: "powershell"
+    test_command: "pnpm test"
+    test_timeout: 300
+    auto_pull: true
+    github_repo: "owner/repo"
+    branch: "master"
+    model: "qwen2.5-coder:7b"
+
+global:
+  ollama_url: "http://localhost:11434"
+  default_model: "qwen2.5-coder:7b"
+  log_file: "/var/log/git-assistant.log"

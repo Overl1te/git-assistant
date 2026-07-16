@@ -30,6 +30,10 @@ from git_assistant import (
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
+CONFIG_EXAMPLE = BASE_DIR / "config.example.yaml"
+
+if not CONFIG_PATH.exists() and CONFIG_EXAMPLE.exists():
+    CONFIG_PATH.write_text(CONFIG_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
 
 app_config = load_config(CONFIG_PATH)
 logger = setup_logging(app_config.global_.log_file)
@@ -75,6 +79,14 @@ class ProjectIn(BaseModel):
     remote_shell: str = "bash"
 
 
+class SettingsIn(BaseModel):
+    """Global settings payload."""
+
+    ollama_url: str = Field(..., min_length=1)
+    default_model: str = Field(..., min_length=1)
+    log_file: str = ""
+
+
 def reload_runtime() -> None:
     """Reload config.yaml into memory."""
     global app_config, assistant
@@ -112,14 +124,16 @@ def _validate_name(name: str) -> str:
 
 
 async def _collect_statuses() -> list[dict[str, Any]]:
-    """Fetch git status for all configured projects."""
-    results: list[dict[str, Any]] = []
-    for project in app_config.projects:
+    """Fetch git status for all configured projects (in parallel)."""
+
+    async def one(project: Any) -> dict[str, Any]:
         status = await assistant.get_status(project)
         row = _status_to_dict(status)
         row["config"] = project_to_dict(project)
-        results.append(row)
-    return results
+        row["ssh_hint"] = GitAssistant.ssh_hint_for_error(status.error)
+        return row
+
+    return list(await asyncio.gather(*[one(p) for p in app_config.projects]))
 
 
 async def _start_job(project_name: str, action: str) -> str:
@@ -187,8 +201,49 @@ async def index(request: Request) -> HTMLResponse:
         {
             "projects": statuses,
             "default_model": app_config.global_.default_model,
+            "ollama_url": app_config.global_.ollama_url,
+            "log_file": app_config.global_.log_file,
         },
     )
+
+
+@app.get("/api/settings")
+async def api_get_settings() -> dict[str, Any]:
+    """Return global settings."""
+    return {
+        "ollama_url": app_config.global_.ollama_url,
+        "default_model": app_config.global_.default_model,
+        "log_file": app_config.global_.log_file,
+        "projects_count": len(app_config.projects),
+    }
+
+
+@app.put("/api/settings")
+async def api_put_settings(body: SettingsIn) -> dict[str, Any]:
+    """Update global settings in config.yaml."""
+    async with config_lock:
+        app_config.global_.ollama_url = body.ollama_url.strip()
+        app_config.global_.default_model = body.default_model.strip()
+        if body.log_file.strip():
+            app_config.global_.log_file = body.log_file.strip()
+        save_config(CONFIG_PATH, app_config)
+        reload_runtime()
+    return await api_get_settings()
+
+
+@app.get("/api/system/doctor")
+async def api_doctor() -> dict[str, Any]:
+    """Environment health checks."""
+    return await assistant.doctor()
+
+
+@app.post("/api/projects/{name}/test-ssh")
+async def api_test_ssh(name: str) -> dict[str, Any]:
+    """Probe SSH + git for a remote project."""
+    project = app_config.get_project(name)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project not found: {name}")
+    return await assistant.test_remote_connection(project)
 
 
 @app.get("/api/projects")
@@ -215,6 +270,7 @@ async def api_create_project(body: ProjectIn) -> dict[str, Any]:
     status = await assistant.get_status(project)
     row = _status_to_dict(status)
     row["config"] = project_to_dict(project)
+    row["ssh_hint"] = GitAssistant.ssh_hint_for_error(status.error)
     return row
 
 
@@ -243,6 +299,7 @@ async def api_update_project(name: str, body: ProjectIn) -> dict[str, Any]:
     status = await assistant.get_status(project)
     row = _status_to_dict(status)
     row["config"] = project_to_dict(project)
+    row["ssh_hint"] = GitAssistant.ssh_hint_for_error(status.error)
     return row
 
 
@@ -271,6 +328,7 @@ async def api_refresh(name: str) -> dict[str, Any]:
     status = await assistant.get_status(project)
     row = _status_to_dict(status)
     row["config"] = project_to_dict(project)
+    row["ssh_hint"] = GitAssistant.ssh_hint_for_error(status.error)
     return row
 
 

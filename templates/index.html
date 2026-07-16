@@ -3,69 +3,139 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Git Assistant with AI</title>
+  <title>Git Assistant</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="page">
-    <header class="header">
-      <div class="brand-wrap">
-        <h1 class="brand">Git Assistant</h1>
-        <p class="subtitle">Smart commit &amp; push · модель <code id="default-model">{{ default_model }}</code></p>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>Git Assistant</h1>
+        <p>Управление коммитами и remote SSH</p>
       </div>
-      <div class="header-actions">
-        <button type="button" class="btn btn-ghost" id="refresh-all">Обновить</button>
-        <button type="button" class="btn btn-primary" id="btn-add">+ Проект</button>
+      <nav class="nav" id="nav">
+        <button type="button" class="nav-btn active" data-view="projects">Проекты</button>
+        <button type="button" class="nav-btn" data-view="settings">Настройки</button>
+        <button type="button" class="nav-btn" data-view="system">Система</button>
+      </nav>
+      <div class="sidebar-foot">
+        Модель по умолчанию<br>
+        <code id="side-model">{{ default_model }}</code>
       </div>
-    </header>
+    </aside>
 
-    <div class="section-head">
-      <h2>Проекты</h2>
-      <span class="subtitle" id="projects-count"></span>
+    <div class="main">
+      <header class="topbar">
+        <div>
+          <h2 id="view-title">Проекты</h2>
+          <p class="meta-line" id="view-sub">Репозитории для Smart Commit / Pull</p>
+        </div>
+        <div class="topbar-actions" id="topbar-actions">
+          <button type="button" class="btn btn-ghost" id="refresh-all">Обновить</button>
+          <button type="button" class="btn btn-primary" id="btn-add">+ Проект</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <section class="view" id="view-projects">
+          <div class="projects" id="projects"></div>
+
+          <section class="panel" id="log-panel">
+            <div class="panel-header">
+              <h3>Live-логи</h3>
+              <span class="panel-sub" id="job-label">Нет активной задачи</span>
+            </div>
+            <pre class="log-view" id="log-view">Ожидание действий…</pre>
+            <div class="result-grid" id="result-panel" hidden>
+              <div>
+                <div class="result-label">Статус</div>
+                <div><span class="badge" id="result-status">—</span></div>
+              </div>
+              <div>
+                <div class="result-label">Сообщение коммита</div>
+                <div class="result-value" id="result-commit">—</div>
+              </div>
+              <div>
+                <div class="result-label">GitHub Actions</div>
+                <div><span class="badge" id="result-actions">—</span></div>
+              </div>
+              <div id="test-block" hidden>
+                <div class="result-label">Вывод тестов</div>
+                <pre class="test-output" id="test-preview"></pre>
+                <button type="button" class="toggle-link" id="test-toggle" hidden>Показать всё</button>
+                <pre class="test-output" id="test-full" hidden></pre>
+              </div>
+              <div id="error-block" hidden>
+                <div class="result-label">Ошибка</div>
+                <div class="result-value" id="result-error" style="color:#ffb4b4;"></div>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-settings" hidden>
+          <div class="settings-grid">
+            <form class="form-card" id="settings-form">
+              <h3>Глобальные настройки</h3>
+              <p class="lead">Пишутся в <code>config.yaml</code> на сервере. После смены модели Ollama убедись, что она скачана (<code>ollama pull …</code>).</p>
+              <div class="form-grid">
+                <div class="field">
+                  <label for="s-ollama">Ollama URL</label>
+                  <input id="s-ollama" name="ollama_url" required value="{{ ollama_url }}">
+                </div>
+                <div class="field">
+                  <label for="s-model">Модель по умолчанию</label>
+                  <input id="s-model" name="default_model" required value="{{ default_model }}" placeholder="qwen2.5-coder:7b">
+                  <div class="hint">Например qwen2.5-coder:3b или qwen2.5-coder:7b</div>
+                </div>
+                <div class="field">
+                  <label for="s-log">Log file</label>
+                  <input id="s-log" name="log_file" value="{{ log_file }}">
+                </div>
+                <div class="form-actions">
+                  <button type="submit" class="btn btn-primary">Сохранить</button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <section class="view" id="view-system" hidden>
+          <div class="system-grid">
+            <div class="form-card">
+              <h3>Диагностика</h3>
+              <p class="lead">Проверка git, ssh, Ollama и GitHub CLI на сервере, где крутится Git Assistant.</p>
+              <div class="form-actions" style="margin-bottom:1rem;">
+                <button type="button" class="btn btn-primary" id="btn-doctor">Запустить doctor</button>
+              </div>
+              <div id="doctor-summary" class="panel-sub" style="margin-bottom:0.75rem;"></div>
+              <div class="check-list" id="doctor-list"></div>
+            </div>
+            <div class="form-card">
+              <h3>SSH с Windows PC</h3>
+              <p class="lead">Если проект remote и статус «ошибка / timed out» — проблема почти всегда на стороне сети или OpenSSH на Windows, а не в UI.</p>
+              <ol style="margin:0;padding-left:1.2rem;color:var(--muted);font-size:0.9rem;line-height:1.65;">
+                <li>На Windows: <code>Get-Service sshd</code> — статус Running. Иначе: Settings → Optional Features → OpenSSH Server.</li>
+                <li>Firewall: разрешить входящий TCP 22 (правило OpenSSH SSH Server).</li>
+                <li>С сервера Git Assistant: <code>ssh -v -o ConnectTimeout=5 user@IP</code></li>
+                <li>В проекте: shell = <code>powershell</code>, path как на Windows, host = <code>user@IP</code>.</li>
+                <li>В карточке проекта нажми «Проверить SSH».</li>
+              </ol>
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
-    <section class="projects" id="projects"></section>
-
-    <section class="panel" id="log-panel">
-      <div class="panel-header">
-        <h2>Live-логи</h2>
-        <span id="job-label" class="subtitle">Нет активной задачи</span>
-      </div>
-      <pre class="log-view" id="log-view">Ожидание действий…</pre>
-      <div class="result-grid" id="result-panel" hidden>
-        <div>
-          <div class="result-label">Статус</div>
-          <div><span class="badge" id="result-status">—</span></div>
-        </div>
-        <div>
-          <div class="result-label">Сообщение коммита</div>
-          <div class="result-value" id="result-commit">—</div>
-        </div>
-        <div>
-          <div class="result-label">GitHub Actions</div>
-          <div><span class="badge" id="result-actions">—</span></div>
-        </div>
-        <div id="test-block" hidden>
-          <div class="result-label">Вывод тестов</div>
-          <pre class="test-output" id="test-preview"></pre>
-          <button type="button" class="toggle-link" id="test-toggle" hidden>Показать всё</button>
-          <pre class="test-output" id="test-full" hidden></pre>
-        </div>
-        <div id="error-block" hidden>
-          <div class="result-label">Ошибка</div>
-          <div class="result-value" id="result-error" style="color:#ffb4b4;"></div>
-        </div>
-      </div>
-    </section>
   </div>
 
   <div class="overlay" id="overlay"></div>
   <aside class="drawer" id="drawer" aria-hidden="true">
     <div class="drawer-head">
       <h2 id="drawer-title">Новый проект</h2>
-      <button type="button" class="btn btn-ghost" id="drawer-close">Закрыть</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="drawer-close">Закрыть</button>
     </div>
     <form class="drawer-body" id="project-form">
       <input type="hidden" id="edit-original-name" value="">
@@ -145,10 +215,11 @@
     </div>
   </aside>
 
+  <div class="toast" id="toast"></div>
+
   <script>
     const DEFAULT_MODEL = {{ default_model|tojson }};
     const projectsEl = document.getElementById("projects");
-    const countEl = document.getElementById("projects-count");
     const logView = document.getElementById("log-view");
     const jobLabel = document.getElementById("job-label");
     const resultPanel = document.getElementById("result-panel");
@@ -157,10 +228,19 @@
     const form = document.getElementById("project-form");
     const remoteFields = document.getElementById("remote-fields");
     const isRemote = document.getElementById("f-is-remote");
+    const toastEl = document.getElementById("toast");
+    const sideModel = document.getElementById("side-model");
 
     let eventSource = null;
     let projectsCache = [];
     let editingName = null;
+    let currentView = "projects";
+
+    const titles = {
+      projects: ["Проекты", "Репозитории для Smart Commit / Pull"],
+      settings: ["Настройки", "Ollama, модель, лог-файл"],
+      system: ["Система", "Doctor и подсказки по SSH"],
+    };
 
     function esc(s) {
       return String(s ?? "")
@@ -170,20 +250,54 @@
         .replace(/"/g, "&quot;");
     }
 
+    function toast(msg, ok) {
+      toastEl.textContent = msg;
+      toastEl.className = "toast show " + (ok ? "ok" : "err");
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => { toastEl.className = "toast"; }, 4200);
+    }
+
+    function setView(name) {
+      currentView = name;
+      document.querySelectorAll(".nav-btn").forEach((b) => {
+        b.classList.toggle("active", b.dataset.view === name);
+      });
+      document.querySelectorAll(".view").forEach((v) => {
+        v.hidden = v.id !== "view-" + name;
+      });
+      const [t, s] = titles[name] || ["", ""];
+      document.getElementById("view-title").textContent = t;
+      document.getElementById("view-sub").textContent = s;
+      const actions = document.getElementById("topbar-actions");
+      actions.hidden = name !== "projects";
+      if (name === "system") runDoctor().catch(() => {});
+    }
+
+    document.getElementById("nav").addEventListener("click", (ev) => {
+      const btn = ev.target.closest("[data-view]");
+      if (!btn) return;
+      setView(btn.dataset.view);
+    });
+
     function badgeFor(p) {
-      if (p.error) return `<span class="badge error" data-badge>ошибка</span>`;
-      if (p.has_changes) return `<span class="badge dirty" data-badge>изменения (${p.change_count})</span>`;
-      return `<span class="badge clean" data-badge>чисто</span>`;
+      if (p.error) return `<span class="badge error">ошибка</span>`;
+      if (p.has_changes) return `<span class="badge dirty">изменения (${p.change_count})</span>`;
+      return `<span class="badge clean">чисто</span>`;
     }
 
     function renderProjects(list) {
       projectsCache = list || [];
-      countEl.textContent = projectsCache.length ? `${projectsCache.length} шт.` : "";
+      const n = projectsCache.length;
+      document.getElementById("view-sub").textContent =
+        currentView === "projects"
+          ? (n ? `${n} проект${n === 1 ? "" : n < 5 ? "а" : "ов"}` : "Пока нет проектов")
+          : titles[currentView][1];
+
       if (!projectsCache.length) {
         projectsEl.innerHTML = `
           <div class="empty">
             <h3>Пока нет проектов</h3>
-            <p>Добавь репозиторий — локальный на сервере или remote по SSH с Windows.</p>
+            <p>Добавь локальный репозиторий на сервере или remote по SSH с Windows.</p>
             <button type="button" class="btn btn-primary" id="empty-add">+ Добавить проект</button>
           </div>`;
         document.getElementById("empty-add").onclick = () => openDrawer();
@@ -192,27 +306,37 @@
 
       projectsEl.innerHTML = projectsCache.map((p) => {
         const cfg = p.config || {};
+        const hint = p.ssh_hint || "";
+        const diagId = `diag-${esc(p.name)}`;
         return `
         <article class="card" data-project="${esc(p.name)}" id="project-${esc(p.name)}">
-          <div class="card-top">
-            <h2 class="card-title">${esc(p.name)}</h2>
-            <div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;">
-              ${p.is_remote ? `<span class="badge remote">SSH</span>` : ""}
+          <div class="card-head">
+            <h3 class="card-title">${esc(p.name)}</h3>
+            <div class="card-badges">
+              ${p.is_remote ? `<span class="badge remote">SSH</span>` : `<span class="badge">local</span>`}
               ${badgeFor(p)}
             </div>
           </div>
-          <div class="meta">
-            <span>Ветка: <code data-branch>${esc(p.branch || "—")}</code></span>
-            <span>Путь: <code>${esc(p.path)}</code></span>
-            ${p.is_remote ? `<span>Host: <code>${esc(p.remote_host)}</code></span>` : ""}
-            ${cfg.test_command ? `<span>Тесты: <code>${esc(cfg.test_command)}</code></span>` : ""}
-            ${p.github_repo ? `<span>Repo: <code>${esc(p.github_repo)}</code></span>` : ""}
+          <div class="facts">
+            <div class="fact"><div class="fact-label">Ветка</div><div class="fact-value">${esc(p.branch || "—")}</div></div>
+            <div class="fact"><div class="fact-label">Путь</div><div class="fact-value">${esc(p.path)}</div></div>
+            ${p.is_remote ? `<div class="fact"><div class="fact-label">Host</div><div class="fact-value">${esc(p.remote_host)}</div></div>` : ""}
+            ${p.is_remote ? `<div class="fact"><div class="fact-label">Shell</div><div class="fact-value">${esc(cfg.remote_shell || "—")}</div></div>` : ""}
+            <div class="fact"><div class="fact-label">Тесты</div><div class="fact-value">${esc(cfg.test_command || "—")}</div></div>
+            <div class="fact"><div class="fact-label">Repo</div><div class="fact-value">${esc(p.github_repo || "—")}</div></div>
           </div>
-          ${p.error ? `<p class="error-text" data-error>${esc(p.error)}</p>` : `<p class="error-text" data-error style="display:none;"></p>`}
-          <div class="actions">
+          ${p.error ? `
+            <div class="alert">
+              <p class="alert-title">Ошибка</p>
+              <p class="alert-body">${esc(p.error)}</p>
+              ${hint ? `<p class="alert-hint">${esc(hint)}</p>` : ""}
+            </div>` : ""}
+          <div class="diag" id="${diagId}" hidden></div>
+          <div class="card-actions">
             <button type="button" class="btn btn-primary" data-action="smart-commit" ${p.error || !p.has_changes ? "disabled" : ""}>Smart Commit</button>
             <button type="button" class="btn btn-danger" data-action="force-commit" ${p.error || !p.has_changes ? "disabled" : ""}>Force</button>
             <button type="button" class="btn btn-ghost" data-action="pull" ${p.error ? "disabled" : ""}>Pull</button>
+            ${p.is_remote ? `<button type="button" class="btn btn-ghost" data-action="test-ssh">Проверить SSH</button>` : ""}
             <button type="button" class="btn btn-ghost" data-action="refresh">Обновить</button>
             <button type="button" class="btn btn-ghost" data-action="edit">Изменить</button>
           </div>
@@ -294,7 +418,7 @@
         payload.remote_shell = document.getElementById("f-remote-shell").value;
         payload.ssh_key = document.getElementById("f-ssh-key").value.trim();
         if (!payload.remote_host) {
-          alert("Укажи SSH host (user@ip)");
+          toast("Укажи SSH host (user@ip)", false);
           return;
         }
       }
@@ -307,10 +431,11 @@
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        alert(err.detail || res.statusText);
+        toast(err.detail || res.statusText, false);
         return;
       }
       closeDrawer();
+      toast("Проект сохранён", true);
       await loadProjects();
     });
 
@@ -320,11 +445,54 @@
       const res = await fetch(`/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        alert(err.detail || res.statusText);
+        toast(err.detail || res.statusText, false);
         return;
       }
       closeDrawer();
+      toast("Проект удалён", true);
       await loadProjects();
+    };
+
+    document.getElementById("settings-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const payload = {
+        ollama_url: document.getElementById("s-ollama").value.trim(),
+        default_model: document.getElementById("s-model").value.trim(),
+        log_file: document.getElementById("s-log").value.trim(),
+      };
+      const res = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast(err.detail || res.statusText, false);
+        return;
+      }
+      const data = await res.json();
+      sideModel.textContent = data.default_model;
+      toast("Настройки сохранены", true);
+    });
+
+    async function runDoctor() {
+      const list = document.getElementById("doctor-list");
+      const summary = document.getElementById("doctor-summary");
+      list.innerHTML = `<div class="panel-sub">Проверка…</div>`;
+      summary.textContent = "";
+      const res = await fetch("/api/system/doctor");
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      summary.textContent = (data.ok ? "OK · " : "Есть проблемы · ") + (data.summary || "");
+      list.innerHTML = (data.checks || []).map((c) => `
+        <div class="check-row">
+          <div class="name"><span class="badge ${c.ok ? "success" : "failure"}">${c.ok ? "ok" : "fail"}</span> ${esc(c.name)}</div>
+          <div class="detail">${esc(c.detail || "")}</div>
+        </div>`).join("");
+    }
+
+    document.getElementById("btn-doctor").onclick = () => {
+      runDoctor().catch((e) => toast(e.message, false));
     };
 
     function appendLog(line) {
@@ -434,7 +602,32 @@
       };
     }
 
-    document.getElementById("refresh-all").onclick = () => loadProjects().catch((e) => alert(e.message));
+    async function testSsh(name, card) {
+      const box = card.querySelector(".diag");
+      if (!box) return;
+      box.hidden = false;
+      box.className = "diag";
+      box.innerHTML = `<h4>Проверка SSH…</h4>`;
+      const res = await fetch(`/api/projects/${encodeURIComponent(name)}/test-ssh`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        box.className = "diag fail";
+        box.innerHTML = `<h4>Ошибка</h4><p class="hint">${esc(data.detail || res.statusText)}</p>`;
+        return;
+      }
+      box.className = "diag " + (data.ok ? "ok" : "fail");
+      const steps = (data.steps || []).map((s) =>
+        `<li><strong>${esc(s.name)}</strong>: ${s.ok ? "ok" : "fail"} — ${esc(s.detail || "")}</li>`
+      ).join("");
+      box.innerHTML = `
+        <h4>${data.ok ? "SSH работает" : "SSH не прошёл"}</h4>
+        <ol>${steps}</ol>
+        ${data.hint ? `<p class="hint">${esc(data.hint)}</p>` : ""}`;
+      if (data.ok) await loadProjects();
+    }
+
+    document.getElementById("refresh-all").onclick = () =>
+      loadProjects().then(() => toast("Обновлено", true)).catch((e) => toast(e.message, false));
 
     projectsEl.addEventListener("click", async (ev) => {
       const btn = ev.target.closest("[data-action]");
@@ -455,8 +648,20 @@
           const res = await fetch(`/api/projects/${encodeURIComponent(name)}/refresh`, { method: "POST" });
           if (!res.ok) throw new Error(await res.text());
           await loadProjects();
+          toast("Статус обновлён", true);
         } catch (e) {
-          alert(e.message);
+          toast(e.message, false);
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+      if (action === "test-ssh") {
+        btn.disabled = true;
+        try {
+          await testSsh(name, card);
+        } catch (e) {
+          toast(e.message, false);
         } finally {
           btn.disabled = false;
         }
@@ -473,7 +678,7 @@
         const res = await fetch(`/api/projects/${encodeURIComponent(name)}${endpoint}`, { method: "POST" });
         if (res.status === 409) {
           const body = await res.json().catch(() => ({}));
-          alert(body.detail || "Задача уже выполняется");
+          toast(body.detail || "Задача уже выполняется", false);
           card.classList.remove("busy");
           return;
         }
@@ -485,11 +690,10 @@
         listenJob(data.job_id, name, action);
       } catch (e) {
         card.classList.remove("busy");
-        alert("Ошибка: " + e.message);
+        toast("Ошибка: " + e.message, false);
       }
     });
 
-    // Initial render from server-side data, then refresh live
     renderProjects({{ projects|tojson }});
     loadProjects().catch(() => {});
   </script>
