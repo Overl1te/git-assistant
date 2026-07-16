@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -309,28 +310,45 @@ class GitAssistant:
         cmd.append(project.remote_host.strip())
         return cmd
 
+    @staticmethod
+    def _ps_encoded_command(script: str) -> list[str]:
+        """Build powershell -EncodedCommand argv (avoids SSH/cmd quoting hell)."""
+        token = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", token]
+
     def _build_remote_argv(self, project: ProjectConfig, args: list[str], cwd: str) -> list[str]:
         """Wrap a command so it runs on the remote host in project.path."""
         shell = (project.remote_shell or "bash").strip().lower()
         ssh = self._ssh_prefix(project)
 
         if shell == "powershell":
-            # Call operator required: bare 'git' 'rev-parse' is a PowerShell parse error.
-            # Non-interactive OpenSSH sessions often miss Machine/User PATH (no git/pnpm).
+            # EncodedCommand: Windows OpenSSH default shell is often cmd.exe, which
+            # mangled -Command quoting and dropped Machine PATH (git/pnpm not found).
             parts = " ".join(self._ps_quote(a) for a in args)
-            ps = (
-                "$env:Path = "
-                "[System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + "
-                "[System.Environment]::GetEnvironmentVariable('Path','User'); "
-                f"Set-Location -LiteralPath {self._ps_quote(cwd)}; "
-                f"& {parts}"
+            win_cwd = cwd.replace("/", "\\")
+            ps = "\n".join(
+                [
+                    "$machine = [System.Environment]::GetEnvironmentVariable('Path','Machine')",
+                    "$user = [System.Environment]::GetEnvironmentVariable('Path','User')",
+                    "$extra = 'C:\\Program Files\\Git\\cmd;C:\\Program Files\\Git\\bin;"
+                    "C:\\Program Files\\nodejs;C:\\Program Files\\GitHub CLI'",
+                    "$env:Path = $extra + ';' + $machine + ';' + $user + ';' + $env:Path",
+                    f"Set-Location -LiteralPath {self._ps_quote(win_cwd)}",
+                    f"& {parts}",
+                    "exit $LASTEXITCODE",
+                ]
             )
-            return ssh + ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps]
+            return ssh + self._ps_encoded_command(ps)
 
         if shell == "cmd":
             win_path = cwd.replace("/", "\\")
             joined = " ".join(f'"{a}"' if ((" " in a) or ("&" in a)) else a for a in args)
-            remote = f'cd /d "{win_path}" && {joined}'
+            # Prepend Git/nodejs so non-interactive SSH sessions find tools
+            remote = (
+                "set PATH=C:\\Program Files\\Git\\cmd;C:\\Program Files\\Git\\bin;"
+                "C:\\Program Files\\nodejs;C:\\Program Files\\GitHub CLI;%PATH% "
+                f'&& cd /d "{win_path}" && {joined}'
+            )
             return ssh + ["cmd", "/c", remote]
 
         # bash (Git Bash on Windows, or Linux remote)
