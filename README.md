@@ -32,13 +32,13 @@ git-assistant/
 - Python 3.10+
 - Git
 - Ollama (для AI-сообщений; без неё работает fallback)
-- Опционально: `GITHUB_TOKEN` для статуса Actions
+- Опционально: GitHub CLI (`gh auth login`) для статуса Actions
 
 ---
 
-## Установка (рекомендуется — TUI)
+## Установка (рекомендуется — консольный TUI)
 
-На Ubuntu 22.04+ достаточно одного скрипта — он спросит всё через меню (whiptail) и настроит сам:
+На Ubuntu 22.04+ достаточно одного скрипта — цветное меню в терминале (как панель управления):
 
 ```bash
 cd /opt/git-assistant   # или путь к клону
@@ -46,13 +46,15 @@ chmod +x install.sh
 ./install.sh
 ```
 
+Управление: цифры `[1]`…`[N]`, `[0]` — назад/нет, Enter — подтвердить.
+
 Мастер устанавливает и настраивает:
 
 1. Системные пакеты (`python3-venv`, `git`, `whiptail`, …)
 2. Python venv + зависимости из `requirements.txt`
 3. `config.yaml` — проекты через TUI (путь, тесты, ветка, repo)
 4. Ollama + скачивание модели (по желанию)
-5. `GITHUB_TOKEN` в `/etc/git-assistant.env` (по желанию)
+5. GitHub CLI (`gh`) + подсказка `gh auth login` (вместо токена)
 6. systemd-сервис `git-assistant` (enable + start)
 7. Порт в UFW (если firewall активен и выбран LAN-доступ)
 8. Лог `/var/log/git-assistant.log`
@@ -94,7 +96,6 @@ projects:
 global:
   ollama_url: "http://localhost:11434"
   default_model: "qwen2.5-coder:3b"
-  github_token_env: "GITHUB_TOKEN"
   log_file: "/var/log/git-assistant.log"
 ```
 
@@ -106,6 +107,21 @@ global:
 sudo systemctl restart git-assistant
 ```
 
+### GitHub Actions через `gh` CLI
+
+Статус Actions читается командой `gh run list`, без `GITHUB_TOKEN` в приложении.
+
+```bash
+# установка (если не сделал installer)
+# или: sudo apt install gh
+
+gh auth login
+gh auth status
+sudo systemctl restart git-assistant
+```
+
+Важно: `gh auth login` нужно выполнить **под тем же пользователем**, от которого крутится systemd-сервис (обычно ваш обычный user). Credentials лежат в `~/.config/gh/`.
+
 ### Переменные окружения
 
 Файл `/etc/git-assistant.env` (создаёт installer):
@@ -113,10 +129,8 @@ sudo systemctl restart git-assistant
 ```bash
 GIT_ASSISTANT_HOST=0.0.0.0   # или 127.0.0.1 для tunnel-only
 GIT_ASSISTANT_PORT=8080
-GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+HOME=/home/youruser          # чтобы gh находил ~/.config/gh
 ```
-
-Токену достаточно scope `repo` / `actions:read`.
 
 ### Ручной запуск (без systemd)
 
@@ -257,12 +271,14 @@ C:\Users\<you>\Documents\GitHub\git-assistant
 - Запустите `test_command` вручную из корня проекта
 - Для Force Commit тесты пропускаются (осознанно)
 
-### GitHub Actions: 401 / unknown
+### GitHub Actions: unknown / gh not logged in
 
-- Проверьте `export GITHUB_TOKEN=...` и имя переменной в `github_token_env`
-- `github_repo` должен быть в формате `owner/repo`
+- Установите CLI: `gh` (installer ставит сам)
+- Войдите: `gh auth login` под пользователем сервиса
+- Проверьте: `gh auth status` и `gh run list --repo owner/repo --limit 1`
+- В `config.yaml` у проекта должен быть `github_repo: "owner/repo"`
 - Без `.github/workflows/` проверка пропускается
-
+- Перезапуск: `sudo systemctl restart git-assistant`
 ### SSE не обновляется за Nginx
 
 - Добавьте `proxy_buffering off;` и длинный `proxy_read_timeout`

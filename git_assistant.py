@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import shlex
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,7 +88,6 @@ class GlobalConfig:
 
     ollama_url: str = "http://localhost:11434"
     default_model: str = "qwen2.5-coder:3b"
-    github_token_env: str = "GITHUB_TOKEN"
     log_file: str = "./git-assistant.log"
 
 
@@ -169,7 +170,6 @@ def load_config(config_path: str | Path) -> AppConfig:
     global_cfg = GlobalConfig(
         ollama_url=global_raw.get("ollama_url", GlobalConfig.ollama_url),
         default_model=global_raw.get("default_model", GlobalConfig.default_model),
-        github_token_env=global_raw.get("github_token_env", GlobalConfig.github_token_env),
         log_file=global_raw.get("log_file", GlobalConfig.log_file),
     )
 
@@ -517,7 +517,7 @@ class GitAssistant:
         on_log: Optional[LogCallback] = None,
         wait_seconds: int = 30,
     ) -> dict[str, Any]:
-        """Wait briefly, then fetch the latest GitHub Actions run status."""
+        """Wait briefly, then fetch the latest Actions run via GitHub CLI (`gh`)."""
         result: dict[str, Any] = {
             "status": "skipped",
             "conclusion": "",
@@ -537,58 +537,93 @@ class GitAssistant:
             )
             return result
 
-        token_env = self.config.global_.github_token_env
-        token = os.environ.get(token_env, "")
-        if not token:
+        if not shutil.which("gh"):
             result["status"] = "unknown"
-            result["message"] = f"{token_env} not set"
+            result["message"] = "gh CLI not found"
             await self._emit(
                 on_log,
-                f"[{project.name}] {token_env} not set, cannot check Actions",
+                f"[{project.name}] gh CLI not found — install GitHub CLI to check Actions",
                 logging.WARNING,
             )
             return result
 
+        # Ensure gh is authenticated for this user
+        auth_code, _, auth_err = await self._run_cmd(
+            ["gh", "auth", "status"],
+            cwd=project.path,
+            timeout=30,
+        )
+        if auth_code != 0:
+            result["status"] = "unknown"
+            result["message"] = "gh not authenticated (run: gh auth login)"
+            await self._emit(
+                on_log,
+                f"[{project.name}] gh not logged in — run: gh auth login",
+                logging.WARNING,
+            )
+            if auth_err.strip():
+                await self._emit(on_log, f"[{project.name}] {auth_err.strip()}", logging.WARNING)
+            return result
+
         await self._emit(
             on_log,
-            f"[{project.name}] Waiting {wait_seconds}s before checking GitHub Actions...",
+            f"[{project.name}] Waiting {wait_seconds}s before checking GitHub Actions (gh)...",
         )
         await asyncio.sleep(wait_seconds)
 
-        url = f"https://api.github.com/repos/{project.github_repo}/actions/runs"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, headers=headers, params={"per_page": 1})
-                if response.status_code == 401:
-                    result["status"] = "error"
-                    result["message"] = "GitHub API 401 — check token"
-                    await self._emit(on_log, f"[{project.name}] {result['message']}", logging.ERROR)
-                    return result
-                response.raise_for_status()
-                runs = response.json().get("workflow_runs") or []
-                if not runs:
-                    result["status"] = "unknown"
-                    result["message"] = "No workflow runs found"
-                    await self._emit(on_log, f"[{project.name}] No Actions runs yet")
-                    return result
-
-                run = runs[0]
-                status = run.get("status") or "unknown"
-                conclusion = run.get("conclusion") or ""
-                result["status"] = status
-                result["conclusion"] = conclusion or ""
-                result["html_url"] = run.get("html_url") or ""
-                label = conclusion or status
+            code, stdout, stderr = await self._run_cmd(
+                [
+                    "gh",
+                    "run",
+                    "list",
+                    "--repo",
+                    project.github_repo,
+                    "--limit",
+                    "1",
+                    "--json",
+                    "status,conclusion,url,databaseId,displayTitle,headBranch",
+                ],
+                cwd=project.path,
+                timeout=60,
+            )
+            if code != 0:
+                combined = (stderr or stdout or "gh run list failed").strip()
+                result["status"] = "error"
+                result["message"] = combined
                 await self._emit(
                     on_log,
-                    f"[{project.name}] GitHub Actions: {label} ({result['html_url']})",
+                    f"[{project.name}] gh run list failed: {combined}",
+                    logging.ERROR,
                 )
                 return result
+
+            runs = json.loads(stdout or "[]")
+            if not runs:
+                result["status"] = "unknown"
+                result["message"] = "No workflow runs found"
+                await self._emit(on_log, f"[{project.name}] No Actions runs yet")
+                return result
+
+            run = runs[0]
+            status = run.get("status") or "unknown"
+            conclusion = run.get("conclusion") or ""
+            result["status"] = status
+            result["conclusion"] = conclusion or ""
+            result["html_url"] = run.get("url") or ""
+            title = run.get("displayTitle") or ""
+            label = conclusion or status
+            extra = f" — {title}" if title else ""
+            await self._emit(
+                on_log,
+                f"[{project.name}] GitHub Actions: {label}{extra} ({result['html_url']})",
+            )
+            return result
+        except json.JSONDecodeError as exc:
+            result["status"] = "error"
+            result["message"] = f"Invalid gh JSON: {exc}"
+            await self._emit(on_log, f"[{project.name}] {result['message']}", logging.ERROR)
+            return result
         except Exception as exc:  # noqa: BLE001
             result["status"] = "error"
             result["message"] = str(exc)

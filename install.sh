@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Git Assistant with AI — interactive TUI installer (Ubuntu 22.04+)
+# Git Assistant with AI — консольный TUI-установщик (Ubuntu 22.04+)
 # Usage: chmod +x install.sh && ./install.sh
 set -euo pipefail
 
@@ -13,7 +13,6 @@ CONFIG_FILE="${APP_DIR}/config.yaml"
 RUN_USER="$(id -un)"
 RUN_UID="$(id -u)"
 RUN_GID="$(id -g)"
-BACKTITLE="Git Assistant with AI — Installer"
 
 # Collected settings
 GA_HOST="0.0.0.0"
@@ -25,12 +24,31 @@ PULL_MODEL="yes"
 SETUP_SYSTEMD="yes"
 START_SERVICE="yes"
 OPEN_UFW="no"
-GITHUB_TOKEN=""
-# Projects stored as lines: name|path|test_command|test_timeout|auto_pull|github_repo|branch|model
+INSTALL_GH="yes"
+# Projects: name|path|test_command|test_timeout|auto_pull|github_repo|branch|model
 PROJECT_LINES=()
 
+# --- Colors (OverVPN-style) ---
+if [[ -t 1 ]] && [[ "${TERM:-}" != "dumb" ]]; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_DIM=$'\033[2m'
+  C_GREEN=$'\033[38;5;82m'
+  C_BLUE=$'\033[38;5;39m'
+  C_CYAN=$'\033[38;5;51m'
+  C_RED=$'\033[38;5;196m'
+  C_YELLOW=$'\033[38;5;220m'
+  C_WHITE=$'\033[97m'
+  C_GRAY=$'\033[38;5;245m'
+else
+  C_RESET=""; C_BOLD=""; C_DIM=""; C_GREEN=""; C_BLUE=""; C_CYAN=""
+  C_RED=""; C_YELLOW=""; C_WHITE=""; C_GRAY=""
+fi
+
+BOX_W=62
+
 die() {
-  echo "ERROR: $*" >&2
+  echo -e "${C_RED}ERROR: $*${C_RESET}" >&2
   exit 1
 }
 
@@ -56,233 +74,331 @@ run_root() {
   fi
 }
 
-# --- UI helpers (whiptail / dialog / fallback) ---
-UI_ENGINE=""
+# --- Console TUI primitives ---
 
-detect_ui() {
-  if need_cmd whiptail; then
-    UI_ENGINE="whiptail"
-  elif need_cmd dialog; then
-    UI_ENGINE="dialog"
-  else
-    UI_ENGINE="fallback"
-  fi
+clear_screen() {
+  printf '\033[2J\033[H'
 }
 
+# Strip ANSI for visible length
+_vis_len() {
+  local s="$1"
+  # shellcheck disable=SC2001
+  s="$(printf '%s' "$s" | sed 's/\x1b\[[0-9;]*m//g')"
+  printf '%s' "${#s}"
+}
+
+_pad_line() {
+  local content="$1"
+  local width="${2:-$BOX_W}"
+  local inner=$((width - 2))
+  local vis
+  vis="$(_vis_len "$content")"
+  local pad=$((inner - vis))
+  [[ $pad -lt 0 ]] && pad=0
+  printf '%s│%s%*s%s│%s\n' "${C_BLUE}" "${content}" "${pad}" "" "${C_BLUE}" "${C_RESET}"
+}
+
+_box_top() {
+  local title="${1:-}"
+  local width="${2:-$BOX_W}"
+  local inner=$((width - 2))
+  if [[ -z "${title}" ]]; then
+    printf '%s┌' "${C_BLUE}"
+    printf '─%.0s' $(seq 1 "${inner}")
+    printf '┐%s\n' "${C_RESET}"
+    return
+  fi
+  local t=" ${title} "
+  local tlen=${#t}
+  local left=$(( (inner - tlen) / 2 ))
+  local right=$(( inner - tlen - left ))
+  [[ $left -lt 0 ]] && left=0
+  [[ $right -lt 0 ]] && right=0
+  printf '%s┌' "${C_BLUE}"
+  printf '─%.0s' $(seq 1 "${left}")
+  printf '%s%s%s' "${C_GREEN}${C_BOLD}" "${t}" "${C_RESET}${C_BLUE}"
+  printf '─%.0s' $(seq 1 "${right}")
+  printf '┐%s\n' "${C_RESET}"
+}
+
+_box_bottom() {
+  local footer="${1:-}"
+  local width="${2:-$BOX_W}"
+  local inner=$((width - 2))
+  if [[ -z "${footer}" ]]; then
+    printf '%s└' "${C_BLUE}"
+    printf '─%.0s' $(seq 1 "${inner}")
+    printf '┘%s\n' "${C_RESET}"
+    return
+  fi
+  local t=" ${footer} "
+  local tlen=${#t}
+  local left=$(( (inner - tlen) / 2 ))
+  local right=$(( inner - tlen - left ))
+  [[ $left -lt 0 ]] && left=0
+  [[ $right -lt 0 ]] && right=0
+  printf '%s└' "${C_BLUE}"
+  printf '─%.0s' $(seq 1 "${left}")
+  printf '%s%s%s' "${C_GREEN}" "${t}" "${C_BLUE}"
+  printf '─%.0s' $(seq 1 "${right}")
+  printf '┘%s\n' "${C_RESET}"
+}
+
+_box_empty() {
+  _pad_line " "
+}
+
+_box_text() {
+  # Word-wrap plain text into box lines (no ANSI in input)
+  local text="$1"
+  local width="${2:-$BOX_W}"
+  local max=$((width - 4))
+  local line=""
+  local word
+  # shellcheck disable=SC2001
+  text="$(printf '%s' "$text" | tr '\n' ' ')"
+  for word in $text; do
+    if [[ -z "${line}" ]]; then
+      line="${word}"
+    elif (( ${#line} + 1 + ${#word} > max )); then
+      _pad_line " ${C_GREEN}${line}${C_RESET}"
+      line="${word}"
+    else
+      line="${line} ${word}"
+    fi
+  done
+  [[ -n "${line}" ]] && _pad_line " ${C_GREEN}${line}${C_RESET}"
+}
+
+draw_banner() {
+  clear_screen
+  echo ""
+  echo -e "${C_CYAN}${C_BOLD}"
+  cat <<'EOF'
+   ██████╗ ██╗████████╗     █████╗ ███████╗███████╗██╗███████╗████████╗
+  ██╔════╝ ██║╚══██╔══╝    ██╔══██╗██╔════╝██╔════╝██║██╔════╝╚══██╔══╝
+  ██║  ███╗██║   ██║       ███████║███████╗███████╗██║███████╗   ██║
+  ██║   ██║██║   ██║       ██╔══██║╚════██║╚════██║██║╚════██║   ██║
+  ╚██████╔╝██║   ██║       ██║  ██║███████║███████║██║███████║   ██║
+   ╚═════╝ ╚═╝   ╚═╝       ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝╚══════╝   ╚═╝
+EOF
+  echo -e "${C_RESET}"
+  echo -e "  ${C_GREEN}Git Assistant with AI • консольный установщик${C_RESET}"
+  echo -e "  ${C_GRAY}${APP_DIR}  ·  user: ${RUN_USER}${C_RESET}"
+  echo ""
+}
+
+# ui_msg TITLE TEXT...
 ui_msg() {
   local title="$1"
-  local text="$2"
-  local height="${3:-12}"
-  local width="${4:-70}"
-  case "${UI_ENGINE}" in
-    whiptail) whiptail --backtitle "${BACKTITLE}" --title "${title}" --msgbox "${text}" "${height}" "${width}" ;;
-    dialog) dialog --backtitle "${BACKTITLE}" --title "${title}" --msgbox "${text}" "${height}" "${width}" ;;
-    *)
-      echo ""
-      echo "=== ${title} ==="
-      echo "${text}"
-      echo ""
-      read -r -p "Enter для продолжения..." _
-      ;;
-  esac
+  shift
+  local text="$*"
+  draw_banner
+  _box_top "${title}"
+  _box_empty
+  local line
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if [[ -z "${line}" ]]; then
+      _box_empty
+    else
+      _pad_line " ${C_GREEN}${line}${C_RESET}"
+    fi
+  done <<<"${text}"
+  _box_empty
+  _box_bottom "git-assistant • enter"
+  echo ""
+  echo -ne "  ${C_GREEN}> Enter для продолжения… ${C_RESET}"
+  read -r _
 }
 
+# ui_yesno TITLE TEXT...  → exit 0=yes, 1=no
 ui_yesno() {
   local title="$1"
-  local text="$2"
-  local height="${3:-10}"
-  local width="${4:-70}"
-  case "${UI_ENGINE}" in
-    whiptail) whiptail --backtitle "${BACKTITLE}" --title "${title}" --yesno "${text}" "${height}" "${width}" ;;
-    dialog) dialog --backtitle "${BACKTITLE}" --title "${title}" --yesno "${text}" "${height}" "${width}" ;;
-    *)
-      echo ""
-      echo "=== ${title} ==="
-      echo "${text}"
-      read -r -p "Да/Нет [y/N]: " ans
-      [[ "${ans}" =~ ^[YyДд] ]]
-      ;;
-  esac
+  shift
+  local text="$*"
+  local choice
+  while true; do
+    draw_banner
+    _box_top "${title}"
+    _box_empty
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ -z "${line}" ]] && _box_empty && continue
+      _pad_line " ${C_GREEN}${line}${C_RESET}"
+    done <<<"${text}"
+    _box_empty
+    _pad_line " ${C_BLUE}[1]${C_RESET}  ${C_GREEN}Да${C_RESET}"
+    _pad_line " ${C_BLUE}[0]${C_RESET}  ${C_GREEN}Нет${C_RESET}"
+    _box_empty
+    _box_bottom "git-assistant • да / нет"
+    echo ""
+    echo -ne "  ${C_GREEN}> Выбор [0]: ${C_RESET}"
+    read -r choice
+    choice="${choice:-0}"
+    case "${choice}" in
+      1|y|Y|д|Д) return 0 ;;
+      0|n|N|н|Н) return 1 ;;
+      *) continue ;;
+    esac
+  done
 }
 
+# ui_input TITLE PROMPT [DEFAULT] → prints value
 ui_input() {
   local title="$1"
-  local text="$2"
+  local prompt="$2"
   local default="${3:-}"
-  local height="${4:-10}"
-  local width="${5:-70}"
   local result=""
-  case "${UI_ENGINE}" in
-    whiptail)
-      result="$(whiptail --backtitle "${BACKTITLE}" --title "${title}" --inputbox "${text}" "${height}" "${width}" "${default}" 3>&1 1>&2 2>&3)" || return 1
-      ;;
-    dialog)
-      result="$(dialog --backtitle "${BACKTITLE}" --title "${title}" --inputbox "${text}" "${height}" "${width}" "${default}" 3>&1 1>&2 2>&3)" || return 1
-      ;;
-    *)
-      echo ""
-      echo "=== ${title} ==="
-      echo "${text}"
-      read -r -p "[${default}]: " result
-      result="${result:-$default}"
-      ;;
-  esac
+  draw_banner
+  _box_top "${title}"
+  _box_empty
+  _pad_line " ${C_GREEN}${prompt}${C_RESET}"
+  if [[ -n "${default}" ]]; then
+    _pad_line " ${C_GRAY}по умолчанию: ${default}${C_RESET}"
+  fi
+  _box_empty
+  _box_bottom "git-assistant • ввод"
+  echo ""
+  if [[ -n "${default}" ]]; then
+    echo -ne "  ${C_GREEN}> [${default}]: ${C_RESET}"
+  else
+    echo -ne "  ${C_GREEN}> ${C_RESET}"
+  fi
+  read -r result
+  result="${result:-$default}"
   printf '%s' "${result}"
 }
 
-ui_password() {
-  local title="$1"
-  local text="$2"
-  local height="${3:-10}"
-  local width="${4:-70}"
-  local result=""
-  case "${UI_ENGINE}" in
-    whiptail)
-      result="$(whiptail --backtitle "${BACKTITLE}" --title "${title}" --passwordbox "${text}" "${height}" "${width}" 3>&1 1>&2 2>&3)" || return 1
-      ;;
-    dialog)
-      result="$(dialog --backtitle "${BACKTITLE}" --title "${title}" --passwordbox "${text}" "${height}" "${width}" 3>&1 1>&2 2>&3)" || return 1
-      ;;
-    *)
-      echo ""
-      echo "=== ${title} ==="
-      echo "${text}"
-      read -r -s -p "Token: " result
-      echo ""
-      ;;
-  esac
-  printf '%s' "${result}"
-}
-
+# ui_menu TITLE  key1 "label1" key2 "label2" ...
+# Prints selected key. Option [0] = cancel (return 1).
+# Labels may start with "!red!" for red coloring (destructive).
 ui_menu() {
   local title="$1"
-  local text="$2"
-  local height="$3"
-  local width="$4"
-  local menu_height="$5"
-  shift 5
-  case "${UI_ENGINE}" in
-    whiptail)
-      whiptail --backtitle "${BACKTITLE}" --title "${title}" --menu "${text}" "${height}" "${width}" "${menu_height}" "$@" 3>&1 1>&2 2>&3
-      ;;
-    dialog)
-      dialog --backtitle "${BACKTITLE}" --title "${title}" --menu "${text}" "${height}" "${width}" "${menu_height}" "$@" 3>&1 1>&2 2>&3
-      ;;
-    *)
-      echo ""
-      echo "=== ${title} ==="
-      echo "${text}"
-      local i=1
-      local keys=()
-      while [[ $# -ge 2 ]]; do
-        keys+=("$1")
-        echo "  $1) $2"
-        shift 2
-        i=$((i + 1))
-      done
-      read -r -p "Выбор: " choice
-      printf '%s' "${choice}"
-      ;;
-  esac
+  shift
+  local keys=()
+  local labels=()
+  local styles=()
+  local i=1
+  while [[ $# -ge 2 ]]; do
+    keys+=("$1")
+    local lab="$2"
+    if [[ "${lab}" == "!red!"* ]]; then
+      styles+=("red")
+      lab="${lab#!red!}"
+    else
+      styles+=("green")
+    fi
+    labels+=("${lab}")
+    shift 2
+    i=$((i + 1))
+  done
+
+  local choice idx
+  while true; do
+    draw_banner
+    _box_top "${title}"
+    _box_empty
+    idx=0
+    while [[ ${idx} -lt ${#keys[@]} ]]; do
+      local num=$((idx + 1))
+      local color="${C_GREEN}"
+      [[ "${styles[$idx]}" == "red" ]] && color="${C_RED}"
+      _pad_line " ${C_BLUE}[${num}]${C_RESET}  ${color}${labels[$idx]}${C_RESET}"
+      idx=$((idx + 1))
+    done
+    _box_empty
+    _pad_line " ${C_BLUE}[0]${C_RESET}  ${C_GREEN}Назад / отмена${C_RESET}"
+    _box_empty
+    _box_bottom "git-assistant • меню"
+    echo ""
+    echo -ne "  ${C_GREEN}> Выбор [0]: ${C_RESET}"
+    read -r choice
+    choice="${choice:-0}"
+    if [[ "${choice}" == "0" ]]; then
+      return 1
+    fi
+    if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#keys[@]} )); then
+      printf '%s' "${keys[$((choice - 1))]}"
+      return 0
+    fi
+  done
 }
 
-ui_checklist() {
-  local title="$1"
-  local text="$2"
-  local height="$3"
-  local width="$4"
-  local list_height="$5"
-  shift 5
-  case "${UI_ENGINE}" in
-    whiptail)
-      whiptail --backtitle "${BACKTITLE}" --title "${title}" --checklist "${text}" "${height}" "${width}" "${list_height}" "$@" 3>&1 1>&2 2>&3
-      ;;
-    dialog)
-      dialog --backtitle "${BACKTITLE}" --title "${title}" --checklist "${text}" "${height}" "${width}" "${list_height}" "$@" 3>&1 1>&2 2>&3
-      ;;
-    *)
-      # fallback: return all ON tags
-      local out=()
-      while [[ $# -ge 3 ]]; do
-        [[ "$3" == "ON" ]] && out+=("$1")
-        shift 3
-      done
-      printf '%s' "${out[*]}"
-      ;;
-  esac
+log_step() {
+  echo -e "  ${C_BLUE}[*]${C_RESET} ${C_GREEN}$*${C_RESET}"
+}
+
+log_warn() {
+  echo -e "  ${C_YELLOW}[!]${C_RESET} $*"
 }
 
 # --- Install steps ---
 
 install_system_packages() {
-  echo "[*] Проверка системных пакетов..."
+  log_step "Проверка системных пакетов..."
   local pkgs=()
   need_cmd python3 || pkgs+=(python3)
   python3 -c "import venv" 2>/dev/null || pkgs+=(python3-venv)
   need_cmd pip3 || pkgs+=(python3-pip)
   need_cmd git || pkgs+=(git)
   need_cmd curl || pkgs+=(curl)
-  need_cmd whiptail || need_cmd dialog || pkgs+=(whiptail)
 
   if [[ ${#pkgs[@]} -gt 0 ]]; then
-    echo "[*] Установка: ${pkgs[*]}"
+    log_step "Установка: ${pkgs[*]}"
     run_root apt-get update -y
     run_root DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"
   fi
-  detect_ui
 }
 
 welcome() {
   ui_msg "Добро пожаловать" \
 "Этот мастер установит Git Assistant with AI:
 
-• Python venv + зависимости
-• config.yaml (проекты через TUI)
-• Ollama + модель (опционально)
-• systemd-сервис (автозапуск)
-• лог-файл и EnvironmentFile для токена
+  • Python venv + зависимости
+  • config.yaml (проекты)
+  • Ollama + модель (опционально)
+  • GitHub CLI (gh) для Actions
+  • systemd-сервис (автозапуск)
 
 Каталог: ${APP_DIR}
-Пользователь сервиса: ${RUN_USER}
-
-Дальше ответьте на несколько вопросов." 16 72
+Пользователь: ${RUN_USER}"
 }
 
 ask_network() {
   local choice
-  choice="$(ui_menu "Сеть" "Как слушать веб-интерфейс?" 14 70 3 \
-    "lan" "0.0.0.0 — доступ по локальному IP (LAN)" \
-    "local" "127.0.0.1 — только localhost / SSH-туннель" \
+  choice="$(ui_menu "Сеть" \
+    "lan"    "LAN — 0.0.0.0 (доступ по локальному IP)" \
+    "local"  "localhost — 127.0.0.1 (только SSH-туннель)" \
     "custom" "Указать host вручную")" || die "Отменено"
 
   case "${choice}" in
     lan) GA_HOST="0.0.0.0" ;;
     local) GA_HOST="127.0.0.1" ;;
     custom)
-      GA_HOST="$(ui_input "Host" "IP или hostname для bind:" "0.0.0.0")" || die "Отменено"
+      GA_HOST="$(ui_input "Host" "IP или hostname для bind" "0.0.0.0")"
       ;;
   esac
 
-  GA_PORT="$(ui_input "Порт" "TCP-порт веб-UI:" "8080")" || die "Отменено"
+  GA_PORT="$(ui_input "Порт" "TCP-порт веб-UI" "8080")"
   [[ "${GA_PORT}" =~ ^[0-9]+$ ]] || die "Некорректный порт: ${GA_PORT}"
 }
 
 ask_model() {
   local choice
-  choice="$(ui_menu "Модель Ollama" "Какую модель использовать по умолчанию?\n(3b — быстрее на 16 ГБ RAM)" 14 70 3 \
-    "3b" "qwen2.5-coder:3b (рекомендуется)" \
-    "7b" "qwen2.5-coder:7b (если хватает RAM)" \
+  choice="$(ui_menu "Модель Ollama" \
+    "3b"     "qwen2.5-coder:3b (рекомендуется, 16 ГБ RAM)" \
+    "7b"     "qwen2.5-coder:7b (если хватает памяти)" \
     "custom" "Указать имя модели вручную")" || die "Отменено"
 
   case "${choice}" in
     3b) DEFAULT_MODEL="qwen2.5-coder:3b" ;;
     7b) DEFAULT_MODEL="qwen2.5-coder:7b" ;;
     custom)
-      DEFAULT_MODEL="$(ui_input "Модель" "Имя модели Ollama:" "qwen2.5-coder:3b")" || die "Отменено"
+      DEFAULT_MODEL="$(ui_input "Модель" "Имя модели Ollama" "qwen2.5-coder:3b")"
       ;;
   esac
 
-  OLLAMA_URL="$(ui_input "Ollama URL" "URL API Ollama:" "http://localhost:11434")" || die "Отменено"
+  OLLAMA_URL="$(ui_input "Ollama URL" "URL API Ollama" "http://localhost:11434")"
 
   if ui_yesno "Ollama" "Установить Ollama, если ещё не установлена?"; then
     INSTALL_OLLAMA="yes"
@@ -290,44 +406,45 @@ ask_model() {
     INSTALL_OLLAMA="no"
   fi
 
-  if ui_yesno "Модель" "Скачать модель ${DEFAULT_MODEL} сейчас?\n(может занять время)"; then
+  if ui_yesno "Модель" "Скачать модель ${DEFAULT_MODEL} сейчас?
+(может занять время и место на диске)"; then
     PULL_MODEL="yes"
   else
     PULL_MODEL="no"
   fi
 }
 
-ask_token() {
-  if ui_yesno "GitHub Token" "Добавить GITHUB_TOKEN для проверки Actions?\n(можно пропустить — Enter/Нет)"; then
-    GITHUB_TOKEN="$(ui_password "GitHub Token" "Вставьте Personal Access Token\n(не отображается):")" || GITHUB_TOKEN=""
+ask_gh() {
+  if ui_yesno "GitHub CLI" "Установить GitHub CLI (gh) для проверки Actions?
+Авторизация: gh auth login (без токена в .env)"; then
+    INSTALL_GH="yes"
   else
-    GITHUB_TOKEN=""
+    INSTALL_GH="no"
   fi
 }
 
 ask_projects() {
   PROJECT_LINES=()
   ui_msg "Проекты" \
-"Сейчас добавьте git-репозитории, которыми будет управлять Assistant.
+"Добавьте git-репозитории для управления.
 
-Для каждого укажите путь, команду тестов, ветку и т.д.
-Можно добавить несколько проектов подряд.
-Если пока нечего добавлять — нажмите «Нет» и отредактируйте config.yaml позже." 14 72
+Для каждого: путь, тесты, ветка, github_repo.
+Можно пропустить и править config.yaml позже."
 
   while true; do
-    if ! ui_yesno "Проект" "Добавить проект?\nУже добавлено: ${#PROJECT_LINES[@]}"; then
+    if ! ui_yesno "Проект" "Добавить проект?
+Уже добавлено: ${#PROJECT_LINES[@]}"; then
       break
     fi
 
     local name path test_command test_timeout auto_pull github_repo branch model
-    name="$(ui_input "Имя проекта" "Короткое имя (например backend):" "backend")" || continue
-    path="$(ui_input "Путь" "Абсолютный путь к git-репозиторию:" "/home/${RUN_USER}/projects/${name}")" || continue
-    test_command="$(ui_input "Тесты" "Команда тестов (пусто = без тестов):" "pytest")" || continue
-    test_timeout="$(ui_input "Таймаут тестов" "Секунды:" "300")" || continue
-    branch="$(ui_input "Ветка" "Ветка для push/pull:" "main")" || continue
-    github_repo="$(ui_input "GitHub repo" "owner/repo (пусто = без Actions):" "")" || true
-    github_repo="${github_repo:-}"
-    model="$(ui_input "Модель" "Модель для этого проекта (пусто = default):" "${DEFAULT_MODEL}")" || true
+    name="$(ui_input "Имя проекта" "Короткое имя (например backend)" "backend")"
+    path="$(ui_input "Путь" "Абсолютный путь к git-репозиторию" "/home/${RUN_USER}/projects/${name}")"
+    test_command="$(ui_input "Тесты" "Команда тестов (пусто = без тестов)" "pytest")"
+    test_timeout="$(ui_input "Таймаут" "Таймаут тестов в секундах" "300")"
+    branch="$(ui_input "Ветка" "Ветка для push/pull" "main")"
+    github_repo="$(ui_input "GitHub repo" "owner/repo (пусто = без Actions)" "")"
+    model="$(ui_input "Модель" "Модель для проекта" "${DEFAULT_MODEL}")"
     model="${model:-$DEFAULT_MODEL}"
 
     if ui_yesno "auto_pull" "Делать git pull --rebase перед коммитом?"; then
@@ -337,17 +454,18 @@ ask_projects() {
     fi
 
     [[ "${test_timeout}" =~ ^[0-9]+$ ]] || test_timeout="300"
-
     PROJECT_LINES+=("${name}|${path}|${test_command}|${test_timeout}|${auto_pull}|${github_repo}|${branch}|${model}")
   done
 
   if [[ ${#PROJECT_LINES[@]} -eq 0 ]]; then
-    ui_msg "Проекты" "Проекты не добавлены.\nБудет записан пустой список — добавьте их в config.yaml позже." 10 70
+    ui_msg "Проекты" "Проекты не добавлены.
+Будет пустой список — допишите config.yaml позже."
   fi
 }
 
 ask_service_options() {
-  if ui_yesno "systemd" "Установить и включить systemd-сервис\n(автозапуск при загрузке)?"; then
+  if ui_yesno "systemd" "Установить и включить systemd-сервис
+(автозапуск при загрузке)?"; then
     SETUP_SYSTEMD="yes"
     if ui_yesno "Запуск" "Запустить сервис сразу после установки?"; then
       START_SERVICE="yes"
@@ -360,7 +478,8 @@ ask_service_options() {
   fi
 
   if [[ "${GA_HOST}" == "0.0.0.0" ]] && need_cmd ufw; then
-    if ui_yesno "UFW" "Открыть порт ${GA_PORT}/tcp в UFW (если firewall активен)?"; then
+    if ui_yesno "UFW" "Открыть порт ${GA_PORT}/tcp в UFW
+(если firewall активен)?"; then
       OPEN_UFW="yes"
     else
       OPEN_UFW="no"
@@ -369,7 +488,6 @@ ask_service_options() {
 }
 
 yaml_escape() {
-  # Minimal escape for double-quoted YAML strings
   local s="$1"
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
@@ -377,7 +495,7 @@ yaml_escape() {
 }
 
 write_config() {
-  echo "[*] Запись ${CONFIG_FILE}"
+  log_step "Запись ${CONFIG_FILE}"
   {
     echo "# Generated by install.sh — $(date -Iseconds)"
     if [[ ${#PROJECT_LINES[@]} -eq 0 ]]; then
@@ -401,53 +519,111 @@ write_config() {
     echo "global:"
     echo "  ollama_url: \"$(yaml_escape "${OLLAMA_URL}")\""
     echo "  default_model: \"$(yaml_escape "${DEFAULT_MODEL}")\""
-    echo "  github_token_env: \"GITHUB_TOKEN\""
     echo "  log_file: \"${LOG_FILE}\""
   } >"${CONFIG_FILE}"
 }
 
 setup_venv() {
-  echo "[*] Создание virtualenv..."
+  log_step "Создание virtualenv..."
   python3 -m venv "${VENV_DIR}"
   # shellcheck disable=SC1091
   source "${VENV_DIR}/bin/activate"
-  echo "[*] Установка Python-зависимостей..."
+  log_step "Установка Python-зависимостей..."
   pip install --upgrade pip
   pip install -r "${APP_DIR}/requirements.txt"
 }
 
 setup_log() {
-  echo "[*] Настройка лог-файла ${LOG_FILE}"
+  log_step "Лог-файл ${LOG_FILE}"
   run_root touch "${LOG_FILE}"
   run_root chown "${RUN_UID}:${RUN_GID}" "${LOG_FILE}"
   run_root chmod 644 "${LOG_FILE}"
 }
 
 setup_env_file() {
-  echo "[*] Запись ${ENV_FILE}"
-  local tmp
+  log_step "EnvironmentFile ${ENV_FILE}"
+  local tmp home_dir
+  home_dir="$(getent passwd "${RUN_USER}" | cut -d: -f6)"
+  home_dir="${home_dir:-/home/${RUN_USER}}"
   tmp="$(mktemp)"
   {
     echo "# Managed by Git Assistant installer"
     echo "GIT_ASSISTANT_HOST=${GA_HOST}"
     echo "GIT_ASSISTANT_PORT=${GA_PORT}"
-    if [[ -n "${GITHUB_TOKEN}" ]]; then
-      echo "GITHUB_TOKEN=${GITHUB_TOKEN}"
-    fi
+    echo "HOME=${home_dir}"
   } >"${tmp}"
-  run_root install -m 600 -o root -g root "${tmp}" "${ENV_FILE}"
-  # Allow service user to read env file
-  run_root chown "root:${RUN_GID}" "${ENV_FILE}"
-  run_root chmod 640 "${ENV_FILE}"
+  run_root install -m 640 -o root -g "${RUN_GID}" "${tmp}" "${ENV_FILE}"
   rm -f "${tmp}"
+}
+
+install_gh_cli() {
+  if need_cmd gh; then
+    log_step "gh уже установлен: $(gh --version | head -n1)"
+    return 0
+  fi
+
+  log_step "Установка GitHub CLI (gh)..."
+  if need_cmd apt-get; then
+    run_root mkdir -p -m 755 /etc/apt/keyrings
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | run_root tee /usr/share/keyrings/githubcli-archive-keyring.gpg >/dev/null
+    run_root chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | run_root tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+    run_root apt-get update -y
+    run_root DEBIAN_FRONTEND=noninteractive apt-get install -y gh
+  else
+    log_warn "Не удалось установить gh автоматически"
+    return 1
+  fi
+}
+
+setup_gh() {
+  [[ "${INSTALL_GH}" == "yes" ]] || return 0
+
+  install_gh_cli || true
+
+  if ! need_cmd gh; then
+    ui_msg "GitHub CLI" "gh не установлен. Actions-статус будет недоступен.
+Позже: установите gh и выполните gh auth login"
+    return 0
+  fi
+
+  if gh auth status >/dev/null 2>&1; then
+    ui_msg "GitHub CLI" "gh уже авторизован — отлично."
+    return 0
+  fi
+
+  ui_msg "Авторизация gh" \
+"Войдите в GitHub CLI под пользователем ${RUN_USER}.
+
+В другом терминале выполните:
+
+  gh auth login
+
+GitHub.com → HTTPS → Login with a web browser
+
+Нажмите Enter, когда закончите (или чтобы пропустить)."
+
+  if gh auth status >/dev/null 2>&1; then
+    ui_msg "GitHub CLI" "Авторизация OK."
+  else
+    ui_msg "GitHub CLI" \
+"Пока не авторизовано. Позже:
+
+  gh auth login
+  sudo systemctl restart git-assistant
+
+Коммиты работают и без этого — просто без статуса Actions."
+  fi
 }
 
 setup_ollama() {
   if [[ "${INSTALL_OLLAMA}" == "yes" ]]; then
     if need_cmd ollama; then
-      echo "[*] Ollama уже установлена"
+      log_step "Ollama уже установлена"
     else
-      echo "[*] Установка Ollama..."
+      log_step "Установка Ollama..."
       curl -fsSL https://ollama.com/install.sh | run_root sh
     fi
     if need_cmd systemctl; then
@@ -457,10 +633,10 @@ setup_ollama() {
 
   if [[ "${PULL_MODEL}" == "yes" ]]; then
     if need_cmd ollama; then
-      echo "[*] Скачивание модели ${DEFAULT_MODEL} (это может занять время)..."
-      ollama pull "${DEFAULT_MODEL}" || echo "[!] Не удалось скачать модель — можно позже: ollama pull ${DEFAULT_MODEL}"
+      log_step "Скачивание модели ${DEFAULT_MODEL}..."
+      ollama pull "${DEFAULT_MODEL}" || log_warn "Не удалось скачать — позже: ollama pull ${DEFAULT_MODEL}"
     else
-      echo "[!] ollama не найдена — пропуск pull модели"
+      log_warn "ollama не найдена — пропуск pull"
     fi
   fi
 }
@@ -469,7 +645,7 @@ setup_systemd() {
   [[ "${SETUP_SYSTEMD}" == "yes" ]] || return 0
   need_cmd systemctl || die "systemctl не найден — systemd недоступен"
 
-  echo "[*] Установка systemd unit ${SERVICE_FILE}"
+  log_step "systemd unit ${SERVICE_FILE}"
   local tmp
   tmp="$(mktemp)"
   cat >"${tmp}" <<EOF
@@ -499,7 +675,7 @@ EOF
   run_root systemctl enable "${SERVICE_NAME}"
 
   if [[ "${START_SERVICE}" == "yes" ]]; then
-    echo "[*] Запуск ${SERVICE_NAME}..."
+    log_step "Запуск ${SERVICE_NAME}..."
     run_root systemctl restart "${SERVICE_NAME}"
     sleep 1
     run_root systemctl --no-pager --full status "${SERVICE_NAME}" || true
@@ -509,10 +685,10 @@ EOF
 setup_ufw() {
   [[ "${OPEN_UFW}" == "yes" ]] || return 0
   if need_cmd ufw && run_root ufw status 2>/dev/null | grep -qi "Status: active"; then
-    echo "[*] UFW: разрешаю ${GA_PORT}/tcp"
+    log_step "UFW: разрешаю ${GA_PORT}/tcp"
     run_root ufw allow "${GA_PORT}/tcp" comment "Git Assistant" || true
   else
-    echo "[*] UFW не активен — правило не добавлялось"
+    log_step "UFW не активен — правило не добавлялось"
   fi
 }
 
@@ -520,86 +696,89 @@ primary_lan_ip() {
   hostname -I 2>/dev/null | awk '{print $1}'
 }
 
+confirm_install() {
+  ui_yesno "Подтверждение" \
+"Host:     ${GA_HOST}
+Port:     ${GA_PORT}
+Model:    ${DEFAULT_MODEL}
+Ollama:   ${INSTALL_OLLAMA} / pull ${PULL_MODEL}
+Projects: ${#PROJECT_LINES[@]}
+systemd:  ${SETUP_SYSTEMD} / start ${START_SERVICE}
+gh CLI:   ${INSTALL_GH}
+
+Продолжить установку?" || die "Установка отменена"
+}
+
 show_summary() {
   local ip
   ip="$(primary_lan_ip)"
   ip="${ip:-<server-ip>}"
 
-  local urls=""
-  urls+="• Локально:  http://127.0.0.1:${GA_PORT}\n"
+  local lines
+  lines="Установка завершена.
+
+  Local:  http://127.0.0.1:${GA_PORT}"
   if [[ "${GA_HOST}" == "0.0.0.0" ]]; then
-    urls+="• По LAN:    http://${ip}:${GA_PORT}\n"
+    lines="${lines}
+  LAN:    http://${ip}:${GA_PORT}"
   fi
-  urls+="• SSH tunnel: ssh -L ${GA_PORT}:127.0.0.1:${GA_PORT} ${RUN_USER}@${ip}\n"
+  lines="${lines}
+  Tunnel: ssh -L ${GA_PORT}:127.0.0.1:${GA_PORT} ${RUN_USER}@${ip}
 
-  local svc=""
-  if [[ "${SETUP_SYSTEMD}" == "yes" ]]; then
-    svc="systemd: systemctl status ${SERVICE_NAME}
-логи:     journalctl -u ${SERVICE_NAME} -f
-конфиг:   ${CONFIG_FILE}
-env:      ${ENV_FILE}"
-  else
-    svc="Запуск вручную:
-  source ${VENV_DIR}/bin/activate
-  python3 ${APP_DIR}/app.py"
-  fi
+  systemctl status ${SERVICE_NAME}
+  journalctl -u ${SERVICE_NAME} -f
+  config: ${CONFIG_FILE}"
 
-  ui_msg "Готово" \
-"Установка завершена.
+  ui_msg "Готово" "${lines}"
 
-Доступ:
-${urls}
-${svc}
-
-Полезные команды:
-  systemctl restart ${SERVICE_NAME}
-  ollama list
-  journalctl -u ${SERVICE_NAME} -n 100" 20 74
-
+  draw_banner
+  _box_top "Статус"
+  _box_empty
+  _pad_line " ${C_GREEN}Git Assistant установлен${C_RESET}"
+  _pad_line " ${C_BLUE}LAN${C_RESET}   ${C_GREEN}http://${ip}:${GA_PORT}${C_RESET}"
+  _pad_line " ${C_BLUE}Local${C_RESET} ${C_GREEN}http://127.0.0.1:${GA_PORT}${C_RESET}"
+  _box_empty
+  _box_bottom "git-assistant • готово"
   echo ""
-  echo "=========================================="
-  echo " Git Assistant установлен"
-  echo " LAN: http://${ip}:${GA_PORT}"
-  echo " Local: http://127.0.0.1:${GA_PORT}"
-  echo " systemctl status ${SERVICE_NAME}"
-  echo "=========================================="
-}
-
-confirm_install() {
-  local summary
-  summary="Host: ${GA_HOST}
-Port: ${GA_PORT}
-Model: ${DEFAULT_MODEL}
-Ollama install: ${INSTALL_OLLAMA}
-Pull model: ${PULL_MODEL}
-Projects: ${#PROJECT_LINES[@]}
-systemd: ${SETUP_SYSTEMD}
-Start now: ${START_SERVICE}
-Token: $([[ -n "${GITHUB_TOKEN}" ]] && echo set || echo skip)
-
-Продолжить установку?"
-  ui_yesno "Подтверждение" "${summary}" 18 70 || die "Установка отменена"
 }
 
 main() {
   cd "${APP_DIR}"
+
+  draw_banner
+  _box_top "Старт"
+  _box_empty
+  _pad_line " ${C_GREEN}Нужен sudo для пакетов / systemd / логов${C_RESET}"
+  _box_empty
+  _box_bottom "git-assistant"
+  echo ""
+
   ensure_root_helper
   install_system_packages
-  detect_ui
 
   welcome
   ask_network
   ask_model
-  ask_token
+  ask_gh
   ask_projects
   ask_service_options
   confirm_install
+
+  echo ""
+  draw_banner
+  _box_top "Установка"
+  _box_empty
+  _pad_line " ${C_GREEN}Идёт настройка — не прерывайте…${C_RESET}"
+  _box_empty
+  _box_bottom "git-assistant"
+  echo ""
 
   write_config
   setup_venv
   setup_log
   setup_env_file
   setup_ollama
+  setup_gh
   setup_systemd
   setup_ufw
   show_summary
