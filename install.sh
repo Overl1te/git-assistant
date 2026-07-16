@@ -841,9 +841,9 @@ restore_config_if_missing() {
 update_code_tree() {
   # Update app files while preserving config.yaml
   local backup_dir="$1"
-  mkdir -p "$APP_DIR"
+  mkdir -p "$APP_DIR" "$backup_dir"
 
-  # Always snapshot live config before touching the tree
+  # Always snapshot live config BEFORE any git reset (file may be dirty/tracked)
   if [[ -f "$CONFIG_FILE" ]]; then
     cp -a "$CONFIG_FILE" "${backup_dir}/config.yaml"
   fi
@@ -852,7 +852,11 @@ update_code_tree() {
     log_step "git fetch/reset ${DEFAULT_BRANCH}"
     git -C "$APP_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || true
     git -C "$APP_DIR" fetch --depth 1 origin "$DEFAULT_BRANCH"
-    git -C "$APP_DIR" checkout -B "$DEFAULT_BRANCH" "origin/${DEFAULT_BRANCH}"
+    # Hard reset: dirty tracked files (old config.yaml, install.sh, …) must not block updates.
+    # User projects live in the backup and are restored below.
+    git -C "$APP_DIR" checkout -f -B "$DEFAULT_BRANCH" "origin/${DEFAULT_BRANCH}"
+    git -C "$APP_DIR" reset --hard "origin/${DEFAULT_BRANCH}"
+    git -C "$APP_DIR" clean -fd -e .venv -e 'config.yaml' -e '*.log' || true
   else
     log_step "Скачивание архива ${DEFAULT_BRANCH}"
     local tmp extracted
@@ -872,7 +876,7 @@ update_code_tree() {
     rm -rf "$tmp"
   fi
 
-  # Restore user config (never leave example/demo projects as live config after update)
+  # Always restore user config (never leave example/demo projects as live config after update)
   if [[ -f "${backup_dir}/config.yaml" ]]; then
     cp -a "${backup_dir}/config.yaml" "$CONFIG_FILE"
   elif [[ ! -f "$CONFIG_FILE" && -f "${APP_DIR}/config.example.yaml" ]]; then
@@ -922,10 +926,31 @@ cmd_check_update() {
   return 2
 }
 
+refresh_updater_from_remote() {
+  # Chicken-egg: old install.sh may fail on dirty config.yaml. Pull latest updater once.
+  [[ "${GIT_ASSISTANT_UPDATER_REFRESHED:-}" == "1" ]] && return 0
+  local tmp
+  tmp="$(mktemp)"
+  if curl -fsSL "${REPO_RAW_BASE}/${DEFAULT_BRANCH}/install.sh" -o "$tmp" 2>/dev/null; then
+    if ! cmp -s "$tmp" "${APP_DIR}/install.sh" 2>/dev/null; then
+      log_step "Обновляю installer из remote…"
+      cp -f "$tmp" "${APP_DIR}/install.sh"
+      chmod 755 "${APP_DIR}/install.sh"
+      rm -f "$tmp"
+      export GIT_ASSISTANT_UPDATER_REFRESHED=1
+      exec bash "${APP_DIR}/install.sh" update "$@"
+    fi
+  fi
+  rm -f "$tmp"
+}
+
 cmd_update() {
   check_root
   is_installed || die "Не установлено. Сначала: sudo ${APP_NAME} install"
   detect_run_user
+
+  # Prefer newest update logic (fixes dirty tracked config.yaml blocking git checkout)
+  refresh_updater_from_remote "$@"
 
   local local_v remote_v backup_dir
   local_v="$(local_version)"
@@ -1276,6 +1301,8 @@ Git Assistant with AI  ($(local_version 2>/dev/null || echo cli))
 Обновление:
   sudo ${APP_NAME} check-update
   sudo ${APP_NAME} update
+  # если локальный updater сломан / dirty tree:
+  sudo bash -c "\$(curl -fsSL ${REPO_RAW_BASE}/${DEFAULT_BRANCH}/install.sh)" @ update
 
 Инфо / конфиг:
   ${APP_NAME} info
