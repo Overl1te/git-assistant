@@ -328,6 +328,8 @@ class GitAssistant:
             win_cwd = cwd.replace("/", "\\")
             ps = "\n".join(
                 [
+                    "$ProgressPreference = 'SilentlyContinue'",
+                    "$ErrorActionPreference = 'Continue'",
                     "$machine = [System.Environment]::GetEnvironmentVariable('Path','Machine')",
                     "$user = [System.Environment]::GetEnvironmentVariable('Path','User')",
                     "$extra = 'C:\\Program Files\\Git\\cmd;C:\\Program Files\\Git\\bin;"
