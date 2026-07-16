@@ -316,8 +316,12 @@ class GitAssistant:
 
         if shell == "powershell":
             # Call operator required: bare 'git' 'rev-parse' is a PowerShell parse error.
+            # Non-interactive OpenSSH sessions often miss Machine/User PATH (no git/pnpm).
             parts = " ".join(self._ps_quote(a) for a in args)
             ps = (
+                "$env:Path = "
+                "[System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + "
+                "[System.Environment]::GetEnvironmentVariable('Path','User'); "
                 f"Set-Location -LiteralPath {self._ps_quote(cwd)}; "
                 f"& {parts}"
             )
@@ -377,10 +381,27 @@ class GitAssistant:
             await process.wait()
             raise TimeoutError(f"Command timed out after {timeout}s: {' '.join(args)}")
 
-        stdout = (stdout_b or b"").decode("utf-8", errors="replace")
-        stderr = (stderr_b or b"").decode("utf-8", errors="replace")
+        stdout = self._decode_bytes(stdout_b or b"")
+        stderr = self._decode_bytes(stderr_b or b"")
         code = process.returncode if process.returncode is not None else -1
         return code, stdout, stderr
+
+    @staticmethod
+    def _decode_bytes(data: bytes) -> str:
+        """Decode subprocess output; Windows SSH often returns CP866/CP1251."""
+        if not data:
+            return ""
+        ranked: list[tuple[int, str]] = []
+        for enc in ("utf-8", "cp866", "cp1251", "oem", "latin-1"):
+            try:
+                text = data.decode(enc)
+            except LookupError:
+                continue
+            except UnicodeDecodeError:
+                text = data.decode(enc, errors="replace")
+            ranked.append((text.count("\ufffd"), text))
+        ranked.sort(key=lambda item: item[0])
+        return ranked[0][1]
 
     async def _run_project_cmd(
         self,
