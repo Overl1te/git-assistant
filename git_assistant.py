@@ -315,8 +315,12 @@ class GitAssistant:
         ssh = self._ssh_prefix(project)
 
         if shell == "powershell":
+            # Call operator required: bare 'git' 'rev-parse' is a PowerShell parse error.
             parts = " ".join(self._ps_quote(a) for a in args)
-            ps = f"Set-Location -LiteralPath {self._ps_quote(cwd)}; {parts}"
+            ps = (
+                f"Set-Location -LiteralPath {self._ps_quote(cwd)}; "
+                f"& {parts}"
+            )
             return ssh + ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps]
 
         if shell == "cmd":
