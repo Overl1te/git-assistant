@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
@@ -15,11 +16,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
 from git_assistant import (
     GitAssistant,
     JobResult,
     load_config,
+    project_from_raw,
+    project_to_dict,
+    save_config,
     setup_logging,
 )
 
@@ -29,6 +34,7 @@ CONFIG_PATH = BASE_DIR / "config.yaml"
 app_config = load_config(CONFIG_PATH)
 logger = setup_logging(app_config.global_.log_file)
 assistant = GitAssistant(app_config, logger=logger)
+config_lock = asyncio.Lock()
 
 
 @dataclass
@@ -52,6 +58,31 @@ active_projects: set[str] = set()
 jobs_lock = asyncio.Lock()
 
 
+class ProjectIn(BaseModel):
+    """Payload for create/update project."""
+
+    name: str = Field(..., min_length=1, max_length=64)
+    path: str = Field(..., min_length=1)
+    test_command: str = ""
+    test_timeout: int = Field(default=300, ge=10, le=7200)
+    auto_pull: bool = False
+    github_repo: str = ""
+    branch: str = "main"
+    model: str = ""
+    remote_host: str = ""
+    remote_port: int = Field(default=22, ge=1, le=65535)
+    ssh_key: str = ""
+    remote_shell: str = "bash"
+
+
+def reload_runtime() -> None:
+    """Reload config.yaml into memory."""
+    global app_config, assistant
+    app_config = load_config(CONFIG_PATH)
+    assistant.config = app_config
+    logger.info("Config reloaded — %d project(s)", len(app_config.projects))
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan hook."""
@@ -70,12 +101,24 @@ def _status_to_dict(status: Any) -> dict[str, Any]:
     return asdict(status)
 
 
+def _validate_name(name: str) -> str:
+    name = name.strip()
+    if not re.fullmatch(r"[A-Za-z0-9._\-]+", name):
+        raise HTTPException(
+            status_code=400,
+            detail="Имя проекта: только латиница, цифры, . _ -",
+        )
+    return name
+
+
 async def _collect_statuses() -> list[dict[str, Any]]:
     """Fetch git status for all configured projects."""
     results: list[dict[str, Any]] = []
     for project in app_config.projects:
         status = await assistant.get_status(project)
-        results.append(_status_to_dict(status))
+        row = _status_to_dict(status)
+        row["config"] = project_to_dict(project)
+        results.append(row)
     return results
 
 
@@ -139,9 +182,9 @@ async def index(request: Request) -> HTMLResponse:
     """Render the dashboard with current project statuses."""
     statuses = await _collect_statuses()
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
-            "request": request,
             "projects": statuses,
             "default_model": app_config.global_.default_model,
         },
@@ -150,8 +193,73 @@ async def index(request: Request) -> HTMLResponse:
 
 @app.get("/api/projects")
 async def api_projects() -> dict[str, Any]:
-    """Return JSON status for all projects."""
+    """Return JSON status (+ config) for all projects."""
     return {"projects": await _collect_statuses()}
+
+
+@app.post("/api/projects")
+async def api_create_project(body: ProjectIn) -> dict[str, Any]:
+    """Add a project to config.yaml."""
+    name = _validate_name(body.name)
+    async with config_lock:
+        if app_config.get_project(name):
+            raise HTTPException(status_code=409, detail=f"Проект уже есть: {name}")
+        project = project_from_raw(body.model_dump())
+        if not project.model:
+            project.model = app_config.global_.default_model
+        app_config.projects.append(project)
+        save_config(CONFIG_PATH, app_config)
+        reload_runtime()
+    project = app_config.get_project(name)
+    assert project is not None
+    status = await assistant.get_status(project)
+    row = _status_to_dict(status)
+    row["config"] = project_to_dict(project)
+    return row
+
+
+@app.put("/api/projects/{name}")
+async def api_update_project(name: str, body: ProjectIn) -> dict[str, Any]:
+    """Update an existing project."""
+    name = _validate_name(name)
+    new_name = _validate_name(body.name)
+    async with config_lock:
+        idx = next((i for i, p in enumerate(app_config.projects) if p.name == name), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail=f"Project not found: {name}")
+        if new_name != name and app_config.get_project(new_name):
+            raise HTTPException(status_code=409, detail=f"Проект уже есть: {new_name}")
+        if name in active_projects or new_name in active_projects:
+            raise HTTPException(status_code=409, detail="Дождитесь окончания задачи")
+        project = project_from_raw(body.model_dump())
+        project.name = new_name
+        if not project.model:
+            project.model = app_config.global_.default_model
+        app_config.projects[idx] = project
+        save_config(CONFIG_PATH, app_config)
+        reload_runtime()
+    project = app_config.get_project(new_name)
+    assert project is not None
+    status = await assistant.get_status(project)
+    row = _status_to_dict(status)
+    row["config"] = project_to_dict(project)
+    return row
+
+
+@app.delete("/api/projects/{name}")
+async def api_delete_project(name: str) -> dict[str, str]:
+    """Remove a project from config.yaml."""
+    name = _validate_name(name)
+    async with config_lock:
+        if name in active_projects:
+            raise HTTPException(status_code=409, detail="Дождитесь окончания задачи")
+        before = len(app_config.projects)
+        app_config.projects = [p for p in app_config.projects if p.name != name]
+        if len(app_config.projects) == before:
+            raise HTTPException(status_code=404, detail=f"Project not found: {name}")
+        save_config(CONFIG_PATH, app_config)
+        reload_runtime()
+    return {"status": "deleted", "name": name}
 
 
 @app.post("/api/projects/{name}/refresh")
@@ -161,7 +269,9 @@ async def api_refresh(name: str) -> dict[str, Any]:
     if not project:
         raise HTTPException(status_code=404, detail=f"Project not found: {name}")
     status = await assistant.get_status(project)
-    return _status_to_dict(status)
+    row = _status_to_dict(status)
+    row["config"] = project_to_dict(project)
+    return row
 
 
 @app.post("/api/projects/{name}/smart-commit")
@@ -212,7 +322,6 @@ async def api_job_events(job_id: str) -> StreamingResponse:
         raise HTTPException(status_code=404, detail="Job not found")
 
     async def event_generator() -> AsyncIterator[str]:
-        # Index-based stream avoids duplicate lines when replaying + live queue.
         sent = 0
         while True:
             while sent < len(state.logs):
@@ -225,7 +334,6 @@ async def api_job_events(job_id: str) -> StreamingResponse:
                 yield f"data: {json.dumps({'type': 'done', 'result': result_payload}, ensure_ascii=False)}\n\n"
                 return
 
-            # Wake when a new log line (or sentinel None) is published
             await state.queue.get()
 
     return StreamingResponse(

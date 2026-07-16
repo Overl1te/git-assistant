@@ -4,69 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Git Assistant with AI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@500;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="page">
     <header class="header">
-      <div>
-        <h1 class="brand">Git Assistant with AI</h1>
-        <p class="subtitle">Smart commit &amp; push · модель по умолчанию: <code>{{ default_model }}</code></p>
+      <div class="brand-wrap">
+        <h1 class="brand">Git <span>Assistant</span></h1>
+        <p class="subtitle">Smart commit &amp; push · модель <code id="default-model">{{ default_model }}</code></p>
       </div>
       <div class="header-actions">
-        <button type="button" class="btn btn-secondary" id="refresh-all">Обновить статус</button>
+        <button type="button" class="btn btn-ghost" id="refresh-all">Обновить</button>
+        <button type="button" class="btn btn-primary" id="btn-add">+ Проект</button>
       </div>
     </header>
 
-    <section class="projects" id="projects">
-      {% if not projects %}
-      <div class="card empty-hint">Нет проектов в config.yaml</div>
-      {% endif %}
-      {% for p in projects %}
-      <article class="card" data-project="{{ p.name }}" id="project-{{ p.name }}">
-        <div class="card-top">
-          <h2 class="card-title">{{ p.name }}</h2>
-          {% if p.error %}
-          <span class="badge error" data-badge>ошибка</span>
-          {% elif p.has_changes %}
-          <span class="badge dirty" data-badge>есть изменения ({{ p.change_count }})</span>
-          {% else %}
-          <span class="badge clean" data-badge>чисто</span>
-          {% endif %}
-        </div>
-        <div class="meta">
-          <span>Ветка: <code data-branch>{{ p.branch or "—" }}</code></span>
-          <span>Путь: <code>{{ p.path }}</code></span>
-          {% if p.is_remote %}
-          <span>Remote: <code>{{ p.remote_host }}</code></span>
-          {% endif %}
-          {% if p.test_command %}<span>Тесты: <code>{{ p.test_command }}</code></span>{% endif %}
-          {% if p.github_repo %}<span>Repo: <code>{{ p.github_repo }}</code></span>{% endif %}
-        </div>
-        {% if p.error %}
-        <p class="subtitle" data-error style="color:#ffa198;margin-bottom:1rem;">{{ p.error }}</p>
-        {% else %}
-        <p class="subtitle" data-error style="display:none;color:#ffa198;margin-bottom:1rem;"></p>
-        {% endif %}
-        <div class="actions">
-          <button
-            type="button"
-            class="btn btn-primary"
-            data-action="smart-commit"
-            {% if p.error or not p.has_changes %}disabled{% endif %}
-          >Smart Commit</button>
-          <button
-            type="button"
-            class="btn btn-danger"
-            data-action="force-commit"
-            {% if p.error or not p.has_changes %}disabled{% endif %}
-          >Force Commit</button>
-          <button type="button" class="btn btn-secondary" data-action="pull" {% if p.error %}disabled{% endif %}>Pull</button>
-          <button type="button" class="btn btn-secondary" data-action="refresh">Обновить</button>
-        </div>
-      </article>
-      {% endfor %}
-    </section>
+    <div class="section-head">
+      <h2>Проекты</h2>
+      <span class="subtitle" id="projects-count"></span>
+    </div>
+    <section class="projects" id="projects"></section>
 
     <section class="panel" id="log-panel">
       <div class="panel-header">
@@ -75,38 +35,297 @@
       </div>
       <pre class="log-view" id="log-view">Ожидание действий…</pre>
       <div class="result-grid" id="result-panel" hidden>
-        <div class="result-row">
-          <span class="result-label">Статус</span>
+        <div>
+          <div class="result-label">Статус</div>
           <div><span class="badge" id="result-status">—</span></div>
         </div>
-        <div class="result-row">
-          <span class="result-label">Сообщение коммита</span>
+        <div>
+          <div class="result-label">Сообщение коммита</div>
           <div class="result-value" id="result-commit">—</div>
         </div>
-        <div class="result-row">
-          <span class="result-label">GitHub Actions</span>
+        <div>
+          <div class="result-label">GitHub Actions</div>
           <div><span class="badge" id="result-actions">—</span></div>
         </div>
-        <div class="result-row" id="test-block" hidden>
-          <span class="result-label">Вывод тестов</span>
+        <div id="test-block" hidden>
+          <div class="result-label">Вывод тестов</div>
           <pre class="test-output" id="test-preview"></pre>
           <button type="button" class="toggle-link" id="test-toggle" hidden>Показать всё</button>
           <pre class="test-output" id="test-full" hidden></pre>
         </div>
-        <div class="result-row" id="error-block" hidden>
-          <span class="result-label">Ошибка</span>
-          <div class="result-value" id="result-error" style="color:#ffa198;"></div>
+        <div id="error-block" hidden>
+          <div class="result-label">Ошибка</div>
+          <div class="result-value" id="result-error" style="color:#ffb4b4;"></div>
         </div>
       </div>
     </section>
   </div>
 
+  <div class="overlay" id="overlay"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <h2 id="drawer-title">Новый проект</h2>
+      <button type="button" class="btn btn-ghost" id="drawer-close">Закрыть</button>
+    </div>
+    <form class="drawer-body" id="project-form">
+      <input type="hidden" id="edit-original-name" value="">
+      <div class="form-grid">
+        <div class="field">
+          <label for="f-name">Имя</label>
+          <input id="f-name" name="name" required placeholder="OverVPN" pattern="[A-Za-z0-9._\-]+">
+          <div class="hint">Латиница, цифры, . _ -</div>
+        </div>
+        <div class="field">
+          <label for="f-path">Путь к репозиторию</label>
+          <input id="f-path" name="path" required placeholder="C:/Users/maksi/Documents/GitHub/OverVPN">
+        </div>
+
+        <label class="check">
+          <input type="checkbox" id="f-is-remote">
+          Код на другом ПК (SSH remote)
+        </label>
+
+        <div class="remote-block" id="remote-fields" hidden>
+          <div class="field">
+            <label for="f-remote-host">SSH host</label>
+            <input id="f-remote-host" placeholder="maksi@192.168.0.201">
+          </div>
+          <div class="row-2">
+            <div class="field">
+              <label for="f-remote-port">Порт</label>
+              <input id="f-remote-port" type="number" value="22" min="1" max="65535">
+            </div>
+            <div class="field">
+              <label for="f-remote-shell">Shell</label>
+              <select id="f-remote-shell">
+                <option value="bash">bash</option>
+                <option value="powershell">powershell</option>
+                <option value="cmd">cmd</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="f-ssh-key">ssh_key на сервере (опционально)</label>
+            <input id="f-ssh-key" placeholder="/home/user/.ssh/id_ed25519">
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="f-test">Команда тестов</label>
+          <input id="f-test" placeholder="pnpm test (пусто = без тестов)">
+        </div>
+        <div class="row-2">
+          <div class="field">
+            <label for="f-timeout">Таймаут сек.</label>
+            <input id="f-timeout" type="number" value="300" min="10" max="7200">
+          </div>
+          <div class="field">
+            <label for="f-branch">Ветка</label>
+            <input id="f-branch" value="master" placeholder="master">
+          </div>
+        </div>
+        <div class="field">
+          <label for="f-github">GitHub repo</label>
+          <input id="f-github" placeholder="Overl1te/OverVPN">
+        </div>
+        <div class="field">
+          <label for="f-model">Модель</label>
+          <input id="f-model" placeholder="{{ default_model }}">
+        </div>
+        <label class="check">
+          <input type="checkbox" id="f-auto-pull">
+          auto_pull (git pull --rebase перед коммитом)
+        </label>
+      </div>
+    </form>
+    <div class="drawer-foot">
+      <button type="button" class="btn btn-danger" id="btn-delete" hidden>Удалить</button>
+      <button type="button" class="btn btn-ghost" id="btn-cancel">Отмена</button>
+      <button type="submit" form="project-form" class="btn btn-primary" id="btn-save">Сохранить</button>
+    </div>
+  </aside>
+
   <script>
+    const DEFAULT_MODEL = {{ default_model|tojson }};
+    const projectsEl = document.getElementById("projects");
+    const countEl = document.getElementById("projects-count");
     const logView = document.getElementById("log-view");
     const jobLabel = document.getElementById("job-label");
     const resultPanel = document.getElementById("result-panel");
+    const overlay = document.getElementById("overlay");
+    const drawer = document.getElementById("drawer");
+    const form = document.getElementById("project-form");
+    const remoteFields = document.getElementById("remote-fields");
+    const isRemote = document.getElementById("f-is-remote");
+
     let eventSource = null;
-    let fullTestOutput = "";
+    let projectsCache = [];
+    let editingName = null;
+
+    function esc(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function badgeFor(p) {
+      if (p.error) return `<span class="badge error" data-badge>ошибка</span>`;
+      if (p.has_changes) return `<span class="badge dirty" data-badge>изменения (${p.change_count})</span>`;
+      return `<span class="badge clean" data-badge>чисто</span>`;
+    }
+
+    function renderProjects(list) {
+      projectsCache = list || [];
+      countEl.textContent = projectsCache.length ? `${projectsCache.length} шт.` : "";
+      if (!projectsCache.length) {
+        projectsEl.innerHTML = `
+          <div class="empty">
+            <h3>Пока нет проектов</h3>
+            <p>Добавь репозиторий — локальный на сервере или remote по SSH с Windows.</p>
+            <button type="button" class="btn btn-primary" id="empty-add">+ Добавить проект</button>
+          </div>`;
+        document.getElementById("empty-add").onclick = () => openDrawer();
+        return;
+      }
+
+      projectsEl.innerHTML = projectsCache.map((p) => {
+        const cfg = p.config || {};
+        return `
+        <article class="card" data-project="${esc(p.name)}" id="project-${esc(p.name)}">
+          <div class="card-top">
+            <h2 class="card-title">${esc(p.name)}</h2>
+            <div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;">
+              ${p.is_remote ? `<span class="badge remote">SSH</span>` : ""}
+              ${badgeFor(p)}
+            </div>
+          </div>
+          <div class="meta">
+            <span>Ветка: <code data-branch>${esc(p.branch || "—")}</code></span>
+            <span>Путь: <code>${esc(p.path)}</code></span>
+            ${p.is_remote ? `<span>Host: <code>${esc(p.remote_host)}</code></span>` : ""}
+            ${cfg.test_command ? `<span>Тесты: <code>${esc(cfg.test_command)}</code></span>` : ""}
+            ${p.github_repo ? `<span>Repo: <code>${esc(p.github_repo)}</code></span>` : ""}
+          </div>
+          ${p.error ? `<p class="error-text" data-error>${esc(p.error)}</p>` : `<p class="error-text" data-error style="display:none;"></p>`}
+          <div class="actions">
+            <button type="button" class="btn btn-primary" data-action="smart-commit" ${p.error || !p.has_changes ? "disabled" : ""}>Smart Commit</button>
+            <button type="button" class="btn btn-danger" data-action="force-commit" ${p.error || !p.has_changes ? "disabled" : ""}>Force</button>
+            <button type="button" class="btn btn-ghost" data-action="pull" ${p.error ? "disabled" : ""}>Pull</button>
+            <button type="button" class="btn btn-ghost" data-action="refresh">Обновить</button>
+            <button type="button" class="btn btn-ghost" data-action="edit">Изменить</button>
+          </div>
+        </article>`;
+      }).join("");
+    }
+
+    async function loadProjects() {
+      const res = await fetch("/api/projects");
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      renderProjects(data.projects || []);
+    }
+
+    function openDrawer(project) {
+      editingName = project ? project.name : null;
+      document.getElementById("drawer-title").textContent = project ? `Изменить: ${project.name}` : "Новый проект";
+      document.getElementById("edit-original-name").value = project ? project.name : "";
+      document.getElementById("btn-delete").hidden = !project;
+
+      const cfg = project ? (project.config || project) : {};
+      document.getElementById("f-name").value = cfg.name || "";
+      document.getElementById("f-path").value = cfg.path || "";
+      document.getElementById("f-test").value = cfg.test_command || "";
+      document.getElementById("f-timeout").value = cfg.test_timeout || 300;
+      document.getElementById("f-branch").value = cfg.branch || "master";
+      document.getElementById("f-github").value = cfg.github_repo || "";
+      document.getElementById("f-model").value = cfg.model || DEFAULT_MODEL;
+      document.getElementById("f-auto-pull").checked = !!cfg.auto_pull;
+
+      const remote = !!(cfg.remote_host);
+      isRemote.checked = remote;
+      remoteFields.hidden = !remote;
+      document.getElementById("f-remote-host").value = cfg.remote_host || "";
+      document.getElementById("f-remote-port").value = cfg.remote_port || 22;
+      document.getElementById("f-remote-shell").value = cfg.remote_shell || "powershell";
+      document.getElementById("f-ssh-key").value = cfg.ssh_key || "";
+
+      overlay.classList.add("open");
+      drawer.classList.add("open");
+      drawer.setAttribute("aria-hidden", "false");
+    }
+
+    function closeDrawer() {
+      overlay.classList.remove("open");
+      drawer.classList.remove("open");
+      drawer.setAttribute("aria-hidden", "true");
+      editingName = null;
+    }
+
+    isRemote.addEventListener("change", () => {
+      remoteFields.hidden = !isRemote.checked;
+    });
+
+    document.getElementById("btn-add").onclick = () => openDrawer();
+    document.getElementById("drawer-close").onclick = closeDrawer;
+    document.getElementById("btn-cancel").onclick = closeDrawer;
+    overlay.onclick = closeDrawer;
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const payload = {
+        name: document.getElementById("f-name").value.trim(),
+        path: document.getElementById("f-path").value.trim(),
+        test_command: document.getElementById("f-test").value.trim(),
+        test_timeout: Number(document.getElementById("f-timeout").value || 300),
+        branch: document.getElementById("f-branch").value.trim() || "main",
+        github_repo: document.getElementById("f-github").value.trim(),
+        model: document.getElementById("f-model").value.trim() || DEFAULT_MODEL,
+        auto_pull: document.getElementById("f-auto-pull").checked,
+        remote_host: "",
+        remote_port: 22,
+        remote_shell: "bash",
+        ssh_key: "",
+      };
+      if (isRemote.checked) {
+        payload.remote_host = document.getElementById("f-remote-host").value.trim();
+        payload.remote_port = Number(document.getElementById("f-remote-port").value || 22);
+        payload.remote_shell = document.getElementById("f-remote-shell").value;
+        payload.ssh_key = document.getElementById("f-ssh-key").value.trim();
+        if (!payload.remote_host) {
+          alert("Укажи SSH host (user@ip)");
+          return;
+        }
+      }
+
+      const original = document.getElementById("edit-original-name").value;
+      const res = await fetch(original ? `/api/projects/${encodeURIComponent(original)}` : "/api/projects", {
+        method: original ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.detail || res.statusText);
+        return;
+      }
+      closeDrawer();
+      await loadProjects();
+    });
+
+    document.getElementById("btn-delete").onclick = async () => {
+      const name = document.getElementById("edit-original-name").value;
+      if (!name || !confirm(`Удалить проект «${name}» из config?`)) return;
+      const res = await fetch(`/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.detail || res.statusText);
+        return;
+      }
+      closeDrawer();
+      await loadProjects();
+    };
 
     function appendLog(line) {
       if (logView.textContent === "Ожидание действий…" || logView.textContent === "") {
@@ -125,7 +344,6 @@
       document.getElementById("test-full").hidden = true;
       document.getElementById("test-toggle").hidden = true;
       document.getElementById("test-toggle").textContent = "Показать всё";
-      fullTestOutput = "";
     }
 
     function setBadge(el, text, cls) {
@@ -143,36 +361,19 @@
     function showResult(result) {
       resultPanel.hidden = false;
       const ok = result && result.success;
-      setBadge(
-        document.getElementById("result-status"),
-        ok ? "успешно" : "ошибка",
-        ok ? "success" : "failure"
-      );
-      document.getElementById("result-commit").textContent =
-        (result && result.commit_message) || "—";
-
+      setBadge(document.getElementById("result-status"), ok ? "успешно" : "ошибка", ok ? "success" : "failure");
+      document.getElementById("result-commit").textContent = (result && result.commit_message) || "—";
       const actions = (result && result.actions_status) || "—";
-      setBadge(
-        document.getElementById("result-actions"),
-        actions,
-        actionsClass(actions)
-      );
+      setBadge(document.getElementById("result-actions"), actions, actionsClass(actions));
 
       const testOut = (result && result.test_output) || "";
       const testBlock = document.getElementById("test-block");
       if (testOut) {
-        fullTestOutput = testOut;
         const lines = testOut.split("\n");
-        const preview = lines.slice(0, 50).join("\n");
-        document.getElementById("test-preview").textContent = preview;
+        document.getElementById("test-preview").textContent = lines.slice(0, 50).join("\n");
         document.getElementById("test-full").textContent = testOut;
         testBlock.hidden = false;
-        const toggle = document.getElementById("test-toggle");
-        if (lines.length > 50) {
-          toggle.hidden = false;
-        } else {
-          toggle.hidden = true;
-        }
+        document.getElementById("test-toggle").hidden = lines.length <= 50;
       } else {
         testBlock.hidden = true;
       }
@@ -201,75 +402,6 @@
       }
     });
 
-    function updateCard(data) {
-      const card = document.getElementById("project-" + data.name);
-      if (!card) return;
-      const badge = card.querySelector("[data-badge]");
-      const branch = card.querySelector("[data-branch]");
-      const errEl = card.querySelector("[data-error]");
-      const smart = card.querySelector('[data-action="smart-commit"]');
-      const force = card.querySelector('[data-action="force-commit"]');
-      const pull = card.querySelector('[data-action="pull"]');
-
-      if (branch) branch.textContent = data.branch || "—";
-
-      if (data.error) {
-        badge.className = "badge error";
-        badge.textContent = "ошибка";
-        if (errEl) {
-          errEl.style.display = "block";
-          errEl.textContent = data.error;
-        }
-        smart.disabled = true;
-        force.disabled = true;
-        pull.disabled = true;
-        return;
-      }
-
-      if (errEl) {
-        errEl.style.display = "none";
-        errEl.textContent = "";
-      }
-      pull.disabled = false;
-
-      if (data.has_changes) {
-        badge.className = "badge dirty";
-        badge.textContent = "есть изменения (" + data.change_count + ")";
-        smart.disabled = false;
-        force.disabled = false;
-      } else {
-        badge.className = "badge clean";
-        badge.textContent = "чисто";
-        smart.disabled = true;
-        force.disabled = true;
-      }
-    }
-
-    async function refreshProject(name) {
-      const res = await fetch("/api/projects/" + encodeURIComponent(name) + "/refresh", {
-        method: "POST",
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      updateCard(data);
-      return data;
-    }
-
-    async function refreshAll() {
-      const res = await fetch("/api/projects");
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      (data.projects || []).forEach(updateCard);
-    }
-
-    document.getElementById("refresh-all").addEventListener("click", async () => {
-      try {
-        await refreshAll();
-      } catch (e) {
-        alert("Не удалось обновить статусы: " + e.message);
-      }
-    });
-
     function closeSSE() {
       if (eventSource) {
         eventSource.close();
@@ -280,28 +412,18 @@
     function listenJob(jobId, projectName, action) {
       closeSSE();
       clearLog();
-      jobLabel.textContent = projectName + " · " + action + " · " + jobId.slice(0, 8);
+      jobLabel.textContent = `${projectName} · ${action} · ${jobId.slice(0, 8)}`;
       appendLog("Подключение к потоку логов…");
-
-      eventSource = new EventSource("/api/jobs/" + jobId + "/events");
+      eventSource = new EventSource(`/api/jobs/${jobId}/events`);
       eventSource.onmessage = async (ev) => {
         let payload;
-        try {
-          payload = JSON.parse(ev.data);
-        } catch (_) {
-          return;
-        }
-        if (payload.type === "log") {
-          appendLog(payload.message);
-        } else if (payload.type === "done") {
+        try { payload = JSON.parse(ev.data); } catch (_) { return; }
+        if (payload.type === "log") appendLog(payload.message);
+        else if (payload.type === "done") {
           appendLog("--- завершено ---");
           showResult(payload.result || {});
           closeSSE();
-          try {
-            await refreshProject(projectName);
-          } catch (_) {
-            /* ignore refresh errors after job */
-          }
+          await loadProjects();
           document.querySelectorAll(".card").forEach((c) => c.classList.remove("busy"));
         }
       };
@@ -312,18 +434,27 @@
       };
     }
 
-    document.getElementById("projects").addEventListener("click", async (ev) => {
+    document.getElementById("refresh-all").onclick = () => loadProjects().catch((e) => alert(e.message));
+
+    projectsEl.addEventListener("click", async (ev) => {
       const btn = ev.target.closest("[data-action]");
       if (!btn || btn.disabled) return;
       const card = btn.closest("[data-project]");
       if (!card) return;
       const name = card.getAttribute("data-project");
       const action = btn.getAttribute("data-action");
+      const project = projectsCache.find((p) => p.name === name);
 
+      if (action === "edit") {
+        openDrawer(project);
+        return;
+      }
       if (action === "refresh") {
         btn.disabled = true;
         try {
-          await refreshProject(name);
+          const res = await fetch(`/api/projects/${encodeURIComponent(name)}/refresh`, { method: "POST" });
+          if (!res.ok) throw new Error(await res.text());
+          await loadProjects();
         } catch (e) {
           alert(e.message);
         } finally {
@@ -331,30 +462,18 @@
         }
         return;
       }
-
       if (action === "force-commit") {
-        const ok = window.confirm(
-          "Force Commit пропустит тесты. Коммит и push будут выполнены без проверки. Продолжить?"
-        );
-        if (!ok) return;
+        if (!confirm("Force Commit пропустит тесты. Продолжить?")) return;
       }
 
-      const endpoint =
-        action === "smart-commit"
-          ? "/smart-commit"
-          : action === "force-commit"
-          ? "/force-commit"
-          : "/pull";
-
+      const endpoint = action === "smart-commit" ? "/smart-commit"
+        : action === "force-commit" ? "/force-commit" : "/pull";
       card.classList.add("busy");
       try {
-        const res = await fetch(
-          "/api/projects/" + encodeURIComponent(name) + endpoint,
-          { method: "POST" }
-        );
+        const res = await fetch(`/api/projects/${encodeURIComponent(name)}${endpoint}`, { method: "POST" });
         if (res.status === 409) {
           const body = await res.json().catch(() => ({}));
-          alert(body.detail || "Задача уже выполняется для этого проекта");
+          alert(body.detail || "Задача уже выполняется");
           card.classList.remove("busy");
           return;
         }
@@ -369,6 +488,10 @@
         alert("Ошибка: " + e.message);
       }
     });
+
+    // Initial render from server-side data, then refresh live
+    renderProjects({{ projects|tojson }});
+    loadProjects().catch(() => {});
   </script>
 </body>
 </html>

@@ -182,24 +182,85 @@ def load_config(config_path: str | Path) -> AppConfig:
 
     projects: list[ProjectConfig] = []
     for item in raw.get("projects") or []:
-        projects.append(
-            ProjectConfig(
-                name=item["name"],
-                path=item["path"],
-                test_command=item.get("test_command", ""),
-                test_timeout=int(item.get("test_timeout", 300)),
-                auto_pull=bool(item.get("auto_pull", False)),
-                github_repo=item.get("github_repo", ""),
-                branch=item.get("branch", ""),
-                model=item.get("model", ""),
-                remote_host=str(item.get("remote_host", "") or ""),
-                remote_port=int(item.get("remote_port", 22) or 22),
-                ssh_key=str(item.get("ssh_key", "") or ""),
-                remote_shell=str(item.get("remote_shell", "bash") or "bash"),
-            )
-        )
+        projects.append(project_from_raw(item))
 
     return AppConfig(projects=projects, global_=global_cfg)
+
+
+def project_from_raw(item: dict[str, Any]) -> ProjectConfig:
+    """Build ProjectConfig from a YAML/JSON mapping."""
+    return ProjectConfig(
+        name=str(item["name"]).strip(),
+        path=str(item["path"]).strip(),
+        test_command=str(item.get("test_command", "") or ""),
+        test_timeout=int(item.get("test_timeout", 300) or 300),
+        auto_pull=bool(item.get("auto_pull", False)),
+        github_repo=str(item.get("github_repo", "") or ""),
+        branch=str(item.get("branch", "") or ""),
+        model=str(item.get("model", "") or ""),
+        remote_host=str(item.get("remote_host", "") or ""),
+        remote_port=int(item.get("remote_port", 22) or 22),
+        ssh_key=str(item.get("ssh_key", "") or ""),
+        remote_shell=str(item.get("remote_shell", "bash") or "bash"),
+    )
+
+
+def project_to_dict(project: ProjectConfig) -> dict[str, Any]:
+    """Serialize project for API / YAML."""
+    data: dict[str, Any] = {
+        "name": project.name,
+        "path": project.path,
+        "test_command": project.test_command,
+        "test_timeout": project.test_timeout,
+        "auto_pull": project.auto_pull,
+        "github_repo": project.github_repo,
+        "branch": project.branch,
+        "model": project.model,
+        "remote_host": project.remote_host,
+        "remote_port": project.remote_port,
+        "ssh_key": project.ssh_key,
+        "remote_shell": project.remote_shell,
+    }
+    return data
+
+
+def save_config(config_path: str | Path, config: AppConfig) -> None:
+    """Atomically write config.yaml."""
+    path = Path(config_path)
+    projects_raw: list[dict[str, Any]] = []
+    for project in config.projects:
+        item = project_to_dict(project)
+        # Keep YAML tidy: drop empty optional remote fields
+        if not item.get("remote_host"):
+            item.pop("remote_host", None)
+            item.pop("remote_port", None)
+            item.pop("ssh_key", None)
+            item.pop("remote_shell", None)
+        elif not item.get("ssh_key"):
+            item.pop("ssh_key", None)
+        projects_raw.append(item)
+
+    payload = {
+        "projects": projects_raw,
+        "global": {
+            "ollama_url": config.global_.ollama_url,
+            "default_model": config.global_.default_model,
+            "log_file": config.global_.log_file,
+        },
+    }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        fh.write("# Git Assistant with AI — managed by web UI / installer\n")
+        yaml.safe_dump(
+            payload,
+            fh,
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+    tmp.replace(path)
 
 
 class GitAssistant:

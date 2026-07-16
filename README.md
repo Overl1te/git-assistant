@@ -53,11 +53,27 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Overl1te/git-assist
 Управление после установки:
 
 ```bash
-git-assistant          # меню
-git-assistant status
-git-assistant restart
-git-assistant logs
-git-assistant uninstall
+git-assistant              # TUI-меню
+git-assistant help
+
+# сервис
+sudo git-assistant status
+sudo git-assistant start|stop|restart
+sudo git-assistant logs
+sudo git-assistant enable|disable
+
+# обновление (сохраняет config.yaml)
+sudo git-assistant check-update
+sudo git-assistant update
+
+# инфо
+git-assistant info
+git-assistant projects
+git-assistant doctor
+sudo git-assistant config
+sudo git-assistant config edit
+
+sudo git-assistant uninstall
 ```
 
 Переустановка / мастер заново:
