@@ -333,14 +333,32 @@ detect_run_user() {
 ensure_packages() {
   log_step "Системные пакеты..."
   local pkgs=()
+  local pyver
+  pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)"
+
   need_cmd curl || pkgs+=(curl)
   need_cmd git || pkgs+=(git)
   need_cmd python3 || pkgs+=(python3)
-  python3 -c "import venv" 2>/dev/null || pkgs+=(python3-venv)
   need_cmd pip3 || pkgs+=(python3-pip)
+
+  # Ubuntu needs versioned package for ensurepip (e.g. python3.12-venv)
+  if ! python3 -c "import ensurepip" 2>/dev/null; then
+    pkgs+=(python3-venv)
+    [[ -n "$pyver" ]] && pkgs+=("python${pyver}-venv")
+  fi
+
   if [[ ${#pkgs[@]} -gt 0 ]]; then
+    # unique-ish
+    local -A seen=()
+    local uniq=()
+    local p
+    for p in "${pkgs[@]}"; do
+      [[ -n "${seen[$p]:-}" ]] && continue
+      seen[$p]=1
+      uniq+=("$p")
+    done
     apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${uniq[@]}"
   fi
 }
 
@@ -570,7 +588,20 @@ write_config() {
 
 setup_venv() {
   log_step "Python venv + зависимости"
-  sudo -u "$RUN_USER" python3 -m venv "$VENV_DIR" 2>/dev/null || python3 -m venv "$VENV_DIR"
+  # Ensure ensurepip is present (fixes partial installs)
+  if ! python3 -c "import ensurepip" 2>/dev/null; then
+    local pyver
+    pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    log_step "Доустанавливаю python${pyver}-venv..."
+    apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "python${pyver}-venv" python3-venv || true
+  fi
+  rm -rf "$VENV_DIR"
+  if [[ "$RUN_USER" != "root" ]]; then
+    sudo -u "$RUN_USER" python3 -m venv "$VENV_DIR" || python3 -m venv "$VENV_DIR"
+  else
+    python3 -m venv "$VENV_DIR"
+  fi
   # shellcheck disable=SC1091
   source "${VENV_DIR}/bin/activate"
   pip install --upgrade pip
