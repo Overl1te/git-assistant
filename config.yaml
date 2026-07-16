@@ -1,0 +1,28 @@
+# Git Assistant with AI — project configuration
+# Edit paths and github_repo for your environment.
+
+projects:
+  - name: "backend"
+    path: "/home/user/projects/backend"
+    test_command: "pytest"
+    test_timeout: 300
+    auto_pull: true
+    github_repo: "username/backend"
+    branch: "main"
+    model: "qwen2.5-coder:3b"
+
+  - name: "frontend"
+    path: "/home/user/projects/frontend"
+    test_command: "npm test"
+    test_timeout: 120
+    auto_pull: false
+    github_repo: "username/frontend"
+    branch: "develop"
+
+global:
+  ollama_url: "http://localhost:11434"
+  default_model: "qwen2.5-coder:3b"
+  github_token_env: "GITHUB_TOKEN"
+  # On Ubuntu: /var/log/git-assistant.log
+  # On Windows (dev): relative path next to the app
+  log_file: "./git-assistant.log"

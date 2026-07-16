@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Git Assistant with AI</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <div>
+        <h1 class="brand">Git Assistant with AI</h1>
+        <p class="subtitle">Smart commit &amp; push · модель по умолчанию: <code>{{ default_model }}</code></p>
+      </div>
+      <div class="header-actions">
+        <button type="button" class="btn btn-secondary" id="refresh-all">Обновить статус</button>
+      </div>
+    </header>
+
+    <section class="projects" id="projects">
+      {% if not projects %}
+      <div class="card empty-hint">Нет проектов в config.yaml</div>
+      {% endif %}
+      {% for p in projects %}
+      <article class="card" data-project="{{ p.name }}" id="project-{{ p.name }}">
+        <div class="card-top">
+          <h2 class="card-title">{{ p.name }}</h2>
+          {% if p.error %}
+          <span class="badge error" data-badge>ошибка</span>
+          {% elif p.has_changes %}
+          <span class="badge dirty" data-badge>есть изменения ({{ p.change_count }})</span>
+          {% else %}
+          <span class="badge clean" data-badge>чисто</span>
+          {% endif %}
+        </div>
+        <div class="meta">
+          <span>Ветка: <code data-branch>{{ p.branch or "—" }}</code></span>
+          <span>Путь: <code>{{ p.path }}</code></span>
+          {% if p.test_command %}<span>Тесты: <code>{{ p.test_command }}</code></span>{% endif %}
+          {% if p.github_repo %}<span>Repo: <code>{{ p.github_repo }}</code></span>{% endif %}
+        </div>
+        {% if p.error %}
+        <p class="subtitle" data-error style="color:#ffa198;margin-bottom:1rem;">{{ p.error }}</p>
+        {% else %}
+        <p class="subtitle" data-error style="display:none;color:#ffa198;margin-bottom:1rem;"></p>
+        {% endif %}
+        <div class="actions">
+          <button
+            type="button"
+            class="btn btn-primary"
+            data-action="smart-commit"
+            {% if p.error or not p.has_changes %}disabled{% endif %}
+          >Smart Commit</button>
+          <button
+            type="button"
+            class="btn btn-danger"
+            data-action="force-commit"
+            {% if p.error or not p.has_changes %}disabled{% endif %}
+          >Force Commit</button>
+          <button type="button" class="btn btn-secondary" data-action="pull" {% if p.error %}disabled{% endif %}>Pull</button>
+          <button type="button" class="btn btn-secondary" data-action="refresh">Обновить</button>
+        </div>
+      </article>
+      {% endfor %}
+    </section>
+
+    <section class="panel" id="log-panel">
+      <div class="panel-header">
+        <h2>Live-логи</h2>
+        <span id="job-label" class="subtitle">Нет активной задачи</span>
+      </div>
+      <pre class="log-view" id="log-view">Ожидание действий…</pre>
+      <div class="result-grid" id="result-panel" hidden>
+        <div class="result-row">
+          <span class="result-label">Статус</span>
+          <div><span class="badge" id="result-status">—</span></div>
+        </div>
+        <div class="result-row">
+          <span class="result-label">Сообщение коммита</span>
+          <div class="result-value" id="result-commit">—</div>
+        </div>
+        <div class="result-row">
+          <span class="result-label">GitHub Actions</span>
+          <div><span class="badge" id="result-actions">—</span></div>
+        </div>
+        <div class="result-row" id="test-block" hidden>
+          <span class="result-label">Вывод тестов</span>
+          <pre class="test-output" id="test-preview"></pre>
+          <button type="button" class="toggle-link" id="test-toggle" hidden>Показать всё</button>
+          <pre class="test-output" id="test-full" hidden></pre>
+        </div>
+        <div class="result-row" id="error-block" hidden>
+          <span class="result-label">Ошибка</span>
+          <div class="result-value" id="result-error" style="color:#ffa198;"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const logView = document.getElementById("log-view");
+    const jobLabel = document.getElementById("job-label");
+    const resultPanel = document.getElementById("result-panel");
+    let eventSource = null;
+    let fullTestOutput = "";
+
+    function appendLog(line) {
+      if (logView.textContent === "Ожидание действий…" || logView.textContent === "") {
+        logView.textContent = line + "\n";
+      } else {
+        logView.textContent += line + "\n";
+      }
+      logView.scrollTop = logView.scrollHeight;
+    }
+
+    function clearLog() {
+      logView.textContent = "";
+      resultPanel.hidden = true;
+      document.getElementById("test-block").hidden = true;
+      document.getElementById("error-block").hidden = true;
+      document.getElementById("test-full").hidden = true;
+      document.getElementById("test-toggle").hidden = true;
+      document.getElementById("test-toggle").textContent = "Показать всё";
+      fullTestOutput = "";
+    }
+
+    function setBadge(el, text, cls) {
+      el.className = "badge " + (cls || "");
+      el.textContent = text;
+    }
+
+    function actionsClass(status) {
+      if (status === "success") return "success";
+      if (status === "failure" || status === "error") return "failure";
+      if (status === "running") return "running";
+      return "skipped";
+    }
+
+    function showResult(result) {
+      resultPanel.hidden = false;
+      const ok = result && result.success;
+      setBadge(
+        document.getElementById("result-status"),
+        ok ? "успешно" : "ошибка",
+        ok ? "success" : "failure"
+      );
+      document.getElementById("result-commit").textContent =
+        (result && result.commit_message) || "—";
+
+      const actions = (result && result.actions_status) || "—";
+      setBadge(
+        document.getElementById("result-actions"),
+        actions,
+        actionsClass(actions)
+      );
+
+      const testOut = (result && result.test_output) || "";
+      const testBlock = document.getElementById("test-block");
+      if (testOut) {
+        fullTestOutput = testOut;
+        const lines = testOut.split("\n");
+        const preview = lines.slice(0, 50).join("\n");
+        document.getElementById("test-preview").textContent = preview;
+        document.getElementById("test-full").textContent = testOut;
+        testBlock.hidden = false;
+        const toggle = document.getElementById("test-toggle");
+        if (lines.length > 50) {
+          toggle.hidden = false;
+        } else {
+          toggle.hidden = true;
+        }
+      } else {
+        testBlock.hidden = true;
+      }
+
+      const errBlock = document.getElementById("error-block");
+      if (result && result.error) {
+        errBlock.hidden = false;
+        document.getElementById("result-error").textContent = result.error;
+      } else {
+        errBlock.hidden = true;
+      }
+    }
+
+    document.getElementById("test-toggle").addEventListener("click", () => {
+      const full = document.getElementById("test-full");
+      const preview = document.getElementById("test-preview");
+      const toggle = document.getElementById("test-toggle");
+      if (full.hidden) {
+        full.hidden = false;
+        preview.hidden = true;
+        toggle.textContent = "Свернуть";
+      } else {
+        full.hidden = true;
+        preview.hidden = false;
+        toggle.textContent = "Показать всё";
+      }
+    });
+
+    function updateCard(data) {
+      const card = document.getElementById("project-" + data.name);
+      if (!card) return;
+      const badge = card.querySelector("[data-badge]");
+      const branch = card.querySelector("[data-branch]");
+      const errEl = card.querySelector("[data-error]");
+      const smart = card.querySelector('[data-action="smart-commit"]');
+      const force = card.querySelector('[data-action="force-commit"]');
+      const pull = card.querySelector('[data-action="pull"]');
+
+      if (branch) branch.textContent = data.branch || "—";
+
+      if (data.error) {
+        badge.className = "badge error";
+        badge.textContent = "ошибка";
+        if (errEl) {
+          errEl.style.display = "block";
+          errEl.textContent = data.error;
+        }
+        smart.disabled = true;
+        force.disabled = true;
+        pull.disabled = true;
+        return;
+      }
+
+      if (errEl) {
+        errEl.style.display = "none";
+        errEl.textContent = "";
+      }
+      pull.disabled = false;
+
+      if (data.has_changes) {
+        badge.className = "badge dirty";
+        badge.textContent = "есть изменения (" + data.change_count + ")";
+        smart.disabled = false;
+        force.disabled = false;
+      } else {
+        badge.className = "badge clean";
+        badge.textContent = "чисто";
+        smart.disabled = true;
+        force.disabled = true;
+      }
+    }
+
+    async function refreshProject(name) {
+      const res = await fetch("/api/projects/" + encodeURIComponent(name) + "/refresh", {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      updateCard(data);
+      return data;
+    }
+
+    async function refreshAll() {
+      const res = await fetch("/api/projects");
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      (data.projects || []).forEach(updateCard);
+    }
+
+    document.getElementById("refresh-all").addEventListener("click", async () => {
+      try {
+        await refreshAll();
+      } catch (e) {
+        alert("Не удалось обновить статусы: " + e.message);
+      }
+    });
+
+    function closeSSE() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+    }
+
+    function listenJob(jobId, projectName, action) {
+      closeSSE();
+      clearLog();
+      jobLabel.textContent = projectName + " · " + action + " · " + jobId.slice(0, 8);
+      appendLog("Подключение к потоку логов…");
+
+      eventSource = new EventSource("/api/jobs/" + jobId + "/events");
+      eventSource.onmessage = async (ev) => {
+        let payload;
+        try {
+          payload = JSON.parse(ev.data);
+        } catch (_) {
+          return;
+        }
+        if (payload.type === "log") {
+          appendLog(payload.message);
+        } else if (payload.type === "done") {
+          appendLog("--- завершено ---");
+          showResult(payload.result || {});
+          closeSSE();
+          try {
+            await refreshProject(projectName);
+          } catch (_) {
+            /* ignore refresh errors after job */
+          }
+          document.querySelectorAll(".card").forEach((c) => c.classList.remove("busy"));
+        }
+      };
+      eventSource.onerror = () => {
+        appendLog("SSE соединение прервано");
+        closeSSE();
+        document.querySelectorAll(".card").forEach((c) => c.classList.remove("busy"));
+      };
+    }
+
+    document.getElementById("projects").addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("[data-action]");
+      if (!btn || btn.disabled) return;
+      const card = btn.closest("[data-project]");
+      if (!card) return;
+      const name = card.getAttribute("data-project");
+      const action = btn.getAttribute("data-action");
+
+      if (action === "refresh") {
+        btn.disabled = true;
+        try {
+          await refreshProject(name);
+        } catch (e) {
+          alert(e.message);
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+
+      if (action === "force-commit") {
+        const ok = window.confirm(
+          "Force Commit пропустит тесты. Коммит и push будут выполнены без проверки. Продолжить?"
+        );
+        if (!ok) return;
+      }
+
+      const endpoint =
+        action === "smart-commit"
+          ? "/smart-commit"
+          : action === "force-commit"
+          ? "/force-commit"
+          : "/pull";
+
+      card.classList.add("busy");
+      try {
+        const res = await fetch(
+          "/api/projects/" + encodeURIComponent(name) + endpoint,
+          { method: "POST" }
+        );
+        if (res.status === 409) {
+          const body = await res.json().catch(() => ({}));
+          alert(body.detail || "Задача уже выполняется для этого проекта");
+          card.classList.remove("busy");
+          return;
+        }
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || res.statusText);
+        }
+        const data = await res.json();
+        listenJob(data.job_id, name, action);
+      } catch (e) {
+        card.classList.remove("busy");
+        alert("Ошибка: " + e.message);
+      }
+    });
+  </script>
+</body>
+</html>
