@@ -253,6 +253,30 @@ textarea {
   pointer-events: none;
 }
 
+.card.probing {
+  border-color: rgba(88, 166, 255, 0.35);
+}
+
+.actions-sep {
+  flex: 0 0 0.35rem;
+  width: 1px;
+  align-self: stretch;
+  background: var(--line-soft);
+  margin: 0 0.15rem;
+}
+
+.error-steps {
+  margin: 0.55rem 0 0;
+  padding-left: 1.15rem;
+  color: #ffd7d3;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.error-steps li {
+  margin: 0.2rem 0;
+}
+
 .card-head {
   display: flex;
   flex-wrap: wrap;

@@ -123,17 +123,72 @@ def _validate_name(name: str) -> str:
     return name
 
 
+def _project_meta_row(project: Any) -> dict[str, Any]:
+    """Config-only project row for fast first paint (no git/SSH)."""
+    cfg = project_to_dict(project)
+    return {
+        "name": project.name,
+        "path": project.path,
+        "branch": "",
+        "has_changes": False,
+        "change_count": 0,
+        "error": None,
+        "configured_branch": project.branch,
+        "github_repo": project.github_repo,
+        "auto_pull": project.auto_pull,
+        "test_command": project.test_command,
+        "remote_host": project.remote_host,
+        "is_remote": bool(project.remote_host and project.remote_host.strip()),
+        "config": cfg,
+        "ssh_hint": "",
+        "loading": True,
+        "ssh_diag": None,
+    }
+
+
+def _collect_meta() -> list[dict[str, Any]]:
+    """Return all projects from config without probing git."""
+    return [_project_meta_row(p) for p in app_config.projects]
+
+
+async def _status_row(project: Any, *, sync_branch: bool = True) -> dict[str, Any]:
+    """Full status row; optionally sync stale config.branch to live checkout."""
+    status = await assistant.get_status(project)
+    row = _status_to_dict(status)
+    row["config"] = project_to_dict(project)
+    row["ssh_hint"] = GitAssistant.ssh_hint_for_error(status.error)
+    row["loading"] = False
+    row["ssh_diag"] = None
+
+    live = (status.branch or "").strip()
+    configured = (project.branch or "").strip()
+    if (
+        sync_branch
+        and not status.error
+        and live
+        and live != "(detached)"
+        and (
+            not configured
+            or (configured in ("main", "master") and configured != live)
+        )
+    ):
+        async with config_lock:
+            fresh = app_config.get_project(project.name)
+            if fresh is not None and (fresh.branch or "").strip() != live:
+                fresh.branch = live
+                save_config(CONFIG_PATH, app_config)
+                reload_runtime()
+                project = app_config.get_project(project.name) or project
+                row["config"] = project_to_dict(project)
+                row["configured_branch"] = live
+                row["branch_synced"] = True
+
+    return row
+
+
 async def _collect_statuses() -> list[dict[str, Any]]:
     """Fetch git status for all configured projects (in parallel)."""
-
-    async def one(project: Any) -> dict[str, Any]:
-        status = await assistant.get_status(project)
-        row = _status_to_dict(status)
-        row["config"] = project_to_dict(project)
-        row["ssh_hint"] = GitAssistant.ssh_hint_for_error(status.error)
-        return row
-
-    return list(await asyncio.gather(*[one(p) for p in app_config.projects]))
+    return list(await asyncio.gather(*[_status_row(p) for p in app_config.projects]))
 
 
 async def _start_job(project_name: str, action: str) -> str:
@@ -193,13 +248,12 @@ async def _run_job(state: JobState) -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    """Render the dashboard with current project statuses."""
-    statuses = await _collect_statuses()
+    """Render the dashboard quickly from config (statuses load in the browser)."""
     return templates.TemplateResponse(
         request,
         "index.html",
         {
-            "projects": statuses,
+            "projects": _collect_meta(),
             "default_model": app_config.global_.default_model,
             "ollama_url": app_config.global_.ollama_url,
             "log_file": app_config.global_.log_file,
@@ -246,9 +300,17 @@ async def api_test_ssh(name: str) -> dict[str, Any]:
     return await assistant.test_remote_connection(project)
 
 
+@app.get("/api/projects/meta")
+async def api_projects_meta() -> dict[str, Any]:
+    """Config-only project list (no git/SSH)."""
+    return {"projects": _collect_meta()}
+
+
 @app.get("/api/projects")
-async def api_projects() -> dict[str, Any]:
-    """Return JSON status (+ config) for all projects."""
+async def api_projects(lite: bool = False) -> dict[str, Any]:
+    """Return JSON status (+ config) for all projects. Use ?lite=1 for config only."""
+    if lite:
+        return {"projects": _collect_meta()}
     return {"projects": await _collect_statuses()}
 
 
@@ -267,11 +329,7 @@ async def api_create_project(body: ProjectIn) -> dict[str, Any]:
         reload_runtime()
     project = app_config.get_project(name)
     assert project is not None
-    status = await assistant.get_status(project)
-    row = _status_to_dict(status)
-    row["config"] = project_to_dict(project)
-    row["ssh_hint"] = GitAssistant.ssh_hint_for_error(status.error)
-    return row
+    return await _status_row(project)
 
 
 @app.put("/api/projects/{name}")
@@ -296,11 +354,7 @@ async def api_update_project(name: str, body: ProjectIn) -> dict[str, Any]:
         reload_runtime()
     project = app_config.get_project(new_name)
     assert project is not None
-    status = await assistant.get_status(project)
-    row = _status_to_dict(status)
-    row["config"] = project_to_dict(project)
-    row["ssh_hint"] = GitAssistant.ssh_hint_for_error(status.error)
-    return row
+    return await _status_row(project)
 
 
 @app.delete("/api/projects/{name}")
@@ -325,11 +379,7 @@ async def api_refresh(name: str) -> dict[str, Any]:
     project = app_config.get_project(name)
     if not project:
         raise HTTPException(status_code=404, detail=f"Project not found: {name}")
-    status = await assistant.get_status(project)
-    row = _status_to_dict(status)
-    row["config"] = project_to_dict(project)
-    row["ssh_hint"] = GitAssistant.ssh_hint_for_error(status.error)
-    return row
+    return await _status_row(project)
 
 
 @app.post("/api/projects/{name}/smart-commit")

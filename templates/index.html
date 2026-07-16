@@ -191,7 +191,8 @@
           </div>
           <div class="field">
             <label for="f-branch">Ветка</label>
-            <input id="f-branch" value="master" placeholder="master">
+            <input id="f-branch" value="" placeholder="пусто = как в репо">
+            <div class="hint">Оставь пустым — подтянется из git автоматически</div>
           </div>
         </div>
         <div class="field">
@@ -280,17 +281,46 @@
     });
 
     function badgeFor(p) {
+      if (p.loading) return `<span class="badge running">проверка…</span>`;
       if (p.error) return `<span class="badge error">ошибка</span>`;
       if (p.has_changes) return `<span class="badge dirty">изменения (${p.change_count})</span>`;
       return `<span class="badge clean">чисто</span>`;
     }
 
+    function healthy(p) {
+      return !p.loading && !p.error;
+    }
+
+    function errorBlockHtml(p) {
+      if (p.loading || !p.error) return "";
+      const hint = p.ssh_hint || "";
+      const diag = p.ssh_diag;
+      let steps = "";
+      if (diag && diag.steps && diag.steps.length) {
+        steps = `<ol class="error-steps">${diag.steps.map((s) =>
+          `<li><strong>${esc(s.name)}</strong>: ${s.ok ? "ok" : "fail"} — ${esc(s.detail || "")}</li>`
+        ).join("")}</ol>`;
+      }
+      const title = diag && !diag.ok ? "SSH / git" : "Ошибка";
+      const bodyHint = (diag && diag.hint) || hint;
+      return `
+        <div class="alert">
+          <p class="alert-title">${esc(title)}</p>
+          <p class="alert-body">${esc(p.error)}</p>
+          ${steps}
+          ${bodyHint ? `<p class="alert-hint">${esc(bodyHint)}</p>` : ""}
+        </div>`;
+    }
+
     function renderProjects(list) {
       projectsCache = list || [];
       const n = projectsCache.length;
+      const probing = projectsCache.some((p) => p.loading);
       document.getElementById("view-sub").textContent =
         currentView === "projects"
-          ? (n ? `${n} проект${n === 1 ? "" : n < 5 ? "а" : "ов"}` : "Пока нет проектов")
+          ? (n
+              ? `${n} проект${n === 1 ? "" : n < 5 ? "а" : "ов"}${probing ? " · обновляю статусы…" : ""}`
+              : "Пока нет проектов")
           : titles[currentView][1];
 
       if (!projectsCache.length) {
@@ -306,10 +336,11 @@
 
       projectsEl.innerHTML = projectsCache.map((p) => {
         const cfg = p.config || {};
-        const hint = p.ssh_hint || "";
-        const diagId = `diag-${esc(p.name)}`;
+        const ok = healthy(p);
+        const canCommit = ok && p.has_changes;
+        const canPull = ok;
         return `
-        <article class="card" data-project="${esc(p.name)}" id="project-${esc(p.name)}">
+        <article class="card ${p.loading ? "probing" : ""}" data-project="${esc(p.name)}" id="project-${esc(p.name)}">
           <div class="card-head">
             <h3 class="card-title">${esc(p.name)}</h3>
             <div class="card-badges">
@@ -318,37 +349,118 @@
             </div>
           </div>
           <div class="facts">
-            <div class="fact"><div class="fact-label">Ветка</div><div class="fact-value">${esc(p.branch || "—")}</div></div>
+            <div class="fact"><div class="fact-label">Ветка</div><div class="fact-value">${esc(p.branch || cfg.branch || "—")}</div></div>
             <div class="fact"><div class="fact-label">Путь</div><div class="fact-value">${esc(p.path)}</div></div>
             ${p.is_remote ? `<div class="fact"><div class="fact-label">Host</div><div class="fact-value">${esc(p.remote_host)}</div></div>` : ""}
             ${p.is_remote ? `<div class="fact"><div class="fact-label">Shell</div><div class="fact-value">${esc(cfg.remote_shell || "—")}</div></div>` : ""}
             <div class="fact"><div class="fact-label">Тесты</div><div class="fact-value">${esc(cfg.test_command || "—")}</div></div>
             <div class="fact"><div class="fact-label">Repo</div><div class="fact-value">${esc(p.github_repo || "—")}</div></div>
           </div>
-          ${p.error ? `
-            <div class="alert">
-              <p class="alert-title">Ошибка</p>
-              <p class="alert-body">${esc(p.error)}</p>
-              ${hint ? `<p class="alert-hint">${esc(hint)}</p>` : ""}
-            </div>` : ""}
-          <div class="diag" id="${diagId}" hidden></div>
+          ${errorBlockHtml(p)}
           <div class="card-actions">
-            <button type="button" class="btn btn-primary" data-action="smart-commit" ${p.error || !p.has_changes ? "disabled" : ""}>Smart Commit</button>
-            <button type="button" class="btn btn-danger" data-action="force-commit" ${p.error || !p.has_changes ? "disabled" : ""}>Force</button>
-            <button type="button" class="btn btn-ghost" data-action="pull" ${p.error ? "disabled" : ""}>Pull</button>
-            ${p.is_remote ? `<button type="button" class="btn btn-ghost" data-action="test-ssh">Проверить SSH</button>` : ""}
-            <button type="button" class="btn btn-ghost" data-action="refresh">Обновить</button>
-            <button type="button" class="btn btn-ghost" data-action="edit">Изменить</button>
+            <button type="button" class="btn btn-primary" data-action="smart-commit" ${canCommit ? "" : "disabled"}>Smart Commit</button>
+            <button type="button" class="btn btn-ghost" data-action="pull" ${canPull ? "" : "disabled"}>Pull</button>
+            <button type="button" class="btn btn-danger btn-sm" data-action="force-commit" ${canCommit ? "" : "disabled"}>Force</button>
+            <span class="actions-sep"></span>
+            ${p.is_remote ? `<button type="button" class="btn btn-ghost btn-sm" data-action="test-ssh">SSH</button>` : ""}
+            <button type="button" class="btn btn-ghost btn-sm" data-action="refresh">↻</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-action="edit">Изменить</button>
           </div>
         </article>`;
       }).join("");
     }
 
+    function upsertProject(row) {
+      const idx = projectsCache.findIndex((p) => p.name === row.name);
+      if (idx >= 0) projectsCache[idx] = { ...projectsCache[idx], ...row, loading: false };
+      else projectsCache.push({ ...row, loading: false });
+      renderProjects(projectsCache);
+    }
+
+    const sshAutoDone = new Set();
+
+    async function autoDiagnoseSsh(name) {
+      if (sshAutoDone.has(name)) return;
+      sshAutoDone.add(name);
+      try {
+        const res = await fetch(`/api/projects/${encodeURIComponent(name)}/test-ssh`, { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        const idx = projectsCache.findIndex((p) => p.name === name);
+        if (idx < 0) return;
+        const p = projectsCache[idx];
+        p.ssh_diag = data;
+        if (data.hint) p.ssh_hint = data.hint;
+        if (data.ok) {
+          await refreshOne(name, { quiet: true });
+          return;
+        }
+        renderProjects(projectsCache);
+      } catch (_) {
+        sshAutoDone.delete(name);
+      }
+    }
+
+    async function refreshOne(name, opts = {}) {
+      const quiet = !!opts.quiet;
+      const res = await fetch(`/api/projects/${encodeURIComponent(name)}/refresh`, { method: "POST" });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || res.statusText);
+      }
+      const row = await res.json();
+      upsertProject(row);
+      if (row.is_remote && row.error) {
+        autoDiagnoseSsh(name);
+      } else if (!row.error) {
+        sshAutoDone.delete(name);
+      }
+      if (row.branch_synced && !quiet) {
+        toast(`Ветка ${row.name}: ${row.branch}`, true);
+      }
+      return row;
+    }
+
+    async function probeAll({ full = false } = {}) {
+      if (full) {
+        const res = await fetch("/api/projects?lite=1");
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        renderProjects((data.projects || []).map((p) => ({ ...p, loading: true })));
+      } else {
+        projectsCache = projectsCache.map((p) => ({ ...p, loading: true }));
+        renderProjects(projectsCache);
+      }
+      const names = projectsCache.map((p) => p.name);
+      await Promise.all(names.map(async (name) => {
+        try {
+          await refreshOne(name, { quiet: true });
+        } catch (e) {
+          const idx = projectsCache.findIndex((p) => p.name === name);
+          if (idx >= 0) {
+            projectsCache[idx] = {
+              ...projectsCache[idx],
+              loading: false,
+              error: String(e.message || e),
+            };
+            renderProjects(projectsCache);
+            if (projectsCache[idx].is_remote) autoDiagnoseSsh(name);
+          }
+        }
+      }));
+    }
+
     async function loadProjects() {
-      const res = await fetch("/api/projects");
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      renderProjects(data.projects || []);
+      await probeAll({ full: true });
+    }
+
+    async function preflight(name) {
+      const row = await refreshOne(name, { quiet: true });
+      if (row.error) {
+        if (row.is_remote) await autoDiagnoseSsh(name);
+        const p = projectsCache.find((x) => x.name === name) || row;
+        throw new Error(p.ssh_hint || p.error || "Проект недоступен");
+      }
+      return row;
     }
 
     function openDrawer(project) {
@@ -362,7 +474,7 @@
       document.getElementById("f-path").value = cfg.path || "";
       document.getElementById("f-test").value = cfg.test_command || "";
       document.getElementById("f-timeout").value = cfg.test_timeout || 300;
-      document.getElementById("f-branch").value = cfg.branch || "master";
+      document.getElementById("f-branch").value = cfg.branch || "";
       document.getElementById("f-github").value = cfg.github_repo || "";
       document.getElementById("f-model").value = cfg.model || DEFAULT_MODEL;
       document.getElementById("f-auto-pull").checked = !!cfg.auto_pull;
@@ -436,6 +548,7 @@
       }
       closeDrawer();
       toast("Проект сохранён", true);
+      sshAutoDone.clear();
       await loadProjects();
     });
 
@@ -591,7 +704,8 @@
           appendLog("--- завершено ---");
           showResult(payload.result || {});
           closeSSE();
-          await loadProjects();
+          sshAutoDone.clear();
+          await probeAll({ full: false });
           document.querySelectorAll(".card").forEach((c) => c.classList.remove("busy"));
         }
       };
@@ -602,28 +716,12 @@
       };
     }
 
-    async function testSsh(name, card) {
-      const box = card.querySelector(".diag");
-      if (!box) return;
-      box.hidden = false;
-      box.className = "diag";
-      box.innerHTML = `<h4>Проверка SSH…</h4>`;
-      const res = await fetch(`/api/projects/${encodeURIComponent(name)}/test-ssh`, { method: "POST" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        box.className = "diag fail";
-        box.innerHTML = `<h4>Ошибка</h4><p class="hint">${esc(data.detail || res.statusText)}</p>`;
-        return;
-      }
-      box.className = "diag " + (data.ok ? "ok" : "fail");
-      const steps = (data.steps || []).map((s) =>
-        `<li><strong>${esc(s.name)}</strong>: ${s.ok ? "ok" : "fail"} — ${esc(s.detail || "")}</li>`
-      ).join("");
-      box.innerHTML = `
-        <h4>${data.ok ? "SSH работает" : "SSH не прошёл"}</h4>
-        <ol>${steps}</ol>
-        ${data.hint ? `<p class="hint">${esc(data.hint)}</p>` : ""}`;
-      if (data.ok) await loadProjects();
+    async function testSsh(name) {
+      sshAutoDone.delete(name);
+      await autoDiagnoseSsh(name);
+      const p = projectsCache.find((x) => x.name === name);
+      if (p && p.ssh_diag && p.ssh_diag.ok) toast("SSH ок", true);
+      else toast("SSH не прошёл — см. карточку", false);
     }
 
     document.getElementById("refresh-all").onclick = () =>
@@ -645,9 +743,7 @@
       if (action === "refresh") {
         btn.disabled = true;
         try {
-          const res = await fetch(`/api/projects/${encodeURIComponent(name)}/refresh`, { method: "POST" });
-          if (!res.ok) throw new Error(await res.text());
-          await loadProjects();
+          await refreshOne(name);
           toast("Статус обновлён", true);
         } catch (e) {
           toast(e.message, false);
@@ -659,7 +755,7 @@
       if (action === "test-ssh") {
         btn.disabled = true;
         try {
-          await testSsh(name, card);
+          await testSsh(name);
         } catch (e) {
           toast(e.message, false);
         } finally {
@@ -671,10 +767,16 @@
         if (!confirm("Force Commit пропустит тесты. Продолжить?")) return;
       }
 
-      const endpoint = action === "smart-commit" ? "/smart-commit"
-        : action === "force-commit" ? "/force-commit" : "/pull";
       card.classList.add("busy");
       try {
+        const row = await preflight(name);
+        if (action !== "pull" && !row.has_changes) {
+          toast("Нет изменений для коммита", false);
+          card.classList.remove("busy");
+          return;
+        }
+        const endpoint = action === "smart-commit" ? "/smart-commit"
+          : action === "force-commit" ? "/force-commit" : "/pull";
         const res = await fetch(`/api/projects/${encodeURIComponent(name)}${endpoint}`, { method: "POST" });
         if (res.status === 409) {
           const body = await res.json().catch(() => ({}));
@@ -690,12 +792,37 @@
         listenJob(data.job_id, name, action);
       } catch (e) {
         card.classList.remove("busy");
-        toast("Ошибка: " + e.message, false);
+        toast(String(e.message || e), false);
+      }
+    });
+
+    // Visibility polling every 15s
+    let pollTimer = null;
+    function startPolling() {
+      stopPolling();
+      pollTimer = setInterval(() => {
+        if (document.visibilityState !== "visible") return;
+        if (currentView !== "projects") return;
+        if (eventSource) return;
+        probeAll({ full: false }).catch(() => {});
+      }, 15000);
+    }
+    function stopPolling() {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        probeAll({ full: false }).catch(() => {});
+        startPolling();
       }
     });
 
     renderProjects({{ projects|tojson }});
-    loadProjects().catch(() => {});
+    probeAll({ full: false }).catch(() => {});
+    startPolling();
   </script>
 </body>
 </html>
