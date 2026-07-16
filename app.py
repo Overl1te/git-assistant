@@ -71,7 +71,7 @@ class ProjectIn(BaseModel):
     test_timeout: int = Field(default=300, ge=10, le=7200)
     auto_pull: bool = False
     github_repo: str = ""
-    branch: str = "main"
+    branch: str = ""
     model: str = ""
     remote_host: str = ""
     remote_port: int = Field(default=22, ge=1, le=65535)

@@ -403,7 +403,7 @@
         path: document.getElementById("f-path").value.trim(),
         test_command: document.getElementById("f-test").value.trim(),
         test_timeout: Number(document.getElementById("f-timeout").value || 300),
-        branch: document.getElementById("f-branch").value.trim() || "main",
+        branch: document.getElementById("f-branch").value.trim() || "",
         github_repo: document.getElementById("f-github").value.trim(),
         model: document.getElementById("f-model").value.trim() || DEFAULT_MODEL,
         auto_pull: document.getElementById("f-auto-pull").checked,

@@ -727,13 +727,26 @@ class GitAssistant:
             await self._emit(on_log, f"[{project.name}] {msg}", logging.ERROR)
             return False, msg
 
+    async def _current_branch(self, project: ProjectConfig) -> str:
+        """Prefer the checked-out branch; fall back to config."""
+        code, out, _ = await self._run_project_cmd(
+            project,
+            ["git", "branch", "--show-current"],
+            timeout=45,
+        )
+        current = (out or "").strip()
+        if code == 0 and current:
+            return current
+        return (project.branch or "").strip()
+
     async def pull_rebase(
         self,
         project: ProjectConfig,
         on_log: Optional[LogCallback] = None,
     ) -> tuple[bool, str]:
         """Run git pull --rebase; abort on conflict."""
-        branch = project.branch
+        # Use the real checkout (master), not a stale config default like "main"
+        branch = await self._current_branch(project)
         await self._emit(
             on_log,
             f"[{project.name}] git pull --rebase" + (f" (branch {branch})" if branch else ""),
@@ -811,8 +824,9 @@ class GitAssistant:
                 return False, "Conflicts detected before push"
 
             push_args = ["git", "push"]
-            if project.branch:
-                push_args.extend(["-u", "origin", project.branch])
+            branch = await self._current_branch(project)
+            if branch:
+                push_args.extend(["-u", "origin", branch])
             await self._emit(on_log, f"[{project.name}] {' '.join(push_args)}")
             code, out, err = await self._run_project_cmd(project, push_args, timeout=180)
             combined = (out + "\n" + err).strip()
