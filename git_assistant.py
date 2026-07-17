@@ -854,6 +854,13 @@ class GitAssistant:
         )
         return code == 0 and bool(out.strip())
 
+    def _local_cwd(self, project: ProjectConfig) -> Optional[str]:
+        """cwd for commands that must run on the Git Assistant host (not via SSH)."""
+        if self._is_remote(project):
+            return None
+        path = Path(project.path)
+        return str(path) if path.is_dir() else None
+
     async def check_actions(
         self,
         project: ProjectConfig,
@@ -872,7 +879,19 @@ class GitAssistant:
             result["message"] = "No github_repo configured"
             return result
 
-        if not await self.has_github_workflows(project):
+        try:
+            has_workflows = await self.has_github_workflows(project)
+        except Exception as exc:  # noqa: BLE001
+            result["status"] = "unknown"
+            result["message"] = f"Could not inspect workflows: {exc}"
+            await self._emit(
+                on_log,
+                f"[{project.name}] Skipping Actions check: {exc}",
+                logging.WARNING,
+            )
+            return result
+
+        if not has_workflows:
             result["message"] = "No .github/workflows found"
             await self._emit(
                 on_log,
@@ -890,12 +909,25 @@ class GitAssistant:
             )
             return result
 
-        # Ensure gh is authenticated for this user
-        auth_code, _, auth_err = await self._run_cmd(
-            ["gh", "auth", "status"],
-            cwd=project.path,
-            timeout=30,
-        )
+        # gh always runs on the Git Assistant server (never use Windows remote path as cwd)
+        gh_cwd = self._local_cwd(project)
+
+        try:
+            auth_code, _, auth_err = await self._run_cmd(
+                ["gh", "auth", "status"],
+                cwd=gh_cwd,
+                timeout=30,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result["status"] = "unknown"
+            result["message"] = f"gh auth check failed: {exc}"
+            await self._emit(
+                on_log,
+                f"[{project.name}] gh auth check failed: {exc}",
+                logging.WARNING,
+            )
+            return result
+
         if auth_code != 0:
             result["status"] = "unknown"
             result["message"] = "gh not authenticated (run: gh auth login)"
@@ -927,7 +959,7 @@ class GitAssistant:
                     "--json",
                     "status,conclusion,url,databaseId,displayTitle,headBranch",
                 ],
-                cwd=project.path,
+                cwd=gh_cwd,
                 timeout=60,
             )
             if code != 0:
@@ -1164,9 +1196,19 @@ class GitAssistant:
             result.error = detail
             return result
 
-        actions = await self.check_actions(project, on_log)
-        result.actions_status = self._actions_label(actions)
-        result.actions_conclusion = actions.get("conclusion") or ""
+        # Push already succeeded — Actions probe must not fail the whole job
+        try:
+            actions = await self.check_actions(project, on_log)
+            result.actions_status = self._actions_label(actions)
+            result.actions_conclusion = actions.get("conclusion") or ""
+        except Exception as exc:  # noqa: BLE001
+            await self._emit(
+                on_log,
+                f"[{project.name}] Actions check skipped after error: {exc}",
+                logging.WARNING,
+            )
+            result.actions_status = "unknown"
+
         result.success = True
         await self._emit(on_log, f"[{project.name}] === {mode} completed successfully ===")
         return result
