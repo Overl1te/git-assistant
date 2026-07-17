@@ -971,6 +971,14 @@ class GitAssistant:
                     f"[{project.name}] gh run list failed: {combined}",
                     logging.ERROR,
                 )
+                if "404" in combined:
+                    await self._emit(
+                        on_log,
+                        f"[{project.name}] Проверь github_repo в настройках проекта "
+                        f"(сейчас «{project.github_repo}» — часто опечатка в owner, "
+                        f"нужно Overl1te/... а не verl1te/...)",
+                        logging.WARNING,
+                    )
                 return result
 
             runs = json.loads(stdout or "[]")
